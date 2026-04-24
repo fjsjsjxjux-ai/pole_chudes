@@ -312,7 +312,7 @@ def build_single_status(game: SinglePlayerGame) -> str:
         f"🔤 <code>{display}</code>",
         f"━━━━━━━━━━━━━━━━━━━━━━",
         f"❤️ Жизни: {lives_str}",
-        f"💰 Очки: <b>{game.score}</b>",
+        f"💰 Очки: <b>{game.score}</b>  🎡 <b>{game.spin_points} за букву</b>",
         f"📝 Буквы: {' '.join(sorted(game.guessed_letters)) or '—'}",
         f"━━━━━━━━━━━━━━━━━━━━━━",
     ]
@@ -486,6 +486,16 @@ async def cmd_single(message: Message, state: FSMContext):
         "🎮 <b>Одиночная игра</b>\n\nВыбери сложность:",
         reply_markup=kb_difficulty("sdiff"),
     )
+
+@dp.message(Command("give"))
+async def cmd_give(message: Message):
+    """Владелец: /give — добавить тестовые предметы себе."""
+    uid = message.from_user.id
+    ensure_user(uid, message.from_user.full_name)
+    add_word_replaces(uid, 3)
+    add_free_hints(uid, 5)
+    add_skip_skips(uid, 3)
+    await message.answer("✅ Добавлено: 3 замены слова, 5 подсказок, 3 защиты (для теста).")
 
 @dp.message(Command("multi"))
 async def cmd_multi(message: Message, state: FSMContext):
@@ -883,7 +893,8 @@ async def cb_s_letter(call: CallbackQuery, state: FSMContext):
 
     count = game.guess_letter(letter)
     if count > 0:
-        await call.answer(f"✅ «{letter}» — {count} раз(а)! +{count*10} очков")
+        earned = count * game.spin_points
+        await call.answer(f"✅ «{letter}» — {count} раз(а)! +{earned} очков")
     else:
         await call.answer(f"❌ «{letter}» — нет такой буквы")
 

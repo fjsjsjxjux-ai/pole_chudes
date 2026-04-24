@@ -75,6 +75,7 @@ class SinglePlayerGame:
         self.guessed_letters: set = set()
         self.lives           = self.max_lives
         self.word_guessed    = False
+        self.spin_points: int = 0  # очков за букву (рандом каждое слово)
 
     def load_words(self) -> bool:
         pool = WORDS_BY_CATEGORY.get(self.category, [])
@@ -113,6 +114,8 @@ class SinglePlayerGame:
         self.lives           = self.max_lives
         self.word_guessed    = False
         self.word_index     += 1
+        # Рандомный множитель очков за букву (как барабан)
+        self.spin_points = random.choice([50, 100, 100, 150, 150, 200, 200, 250, 300, 350, 400, 500])
 
     def guess_letter(self, letter: str) -> int:
         letter = letter.upper()
@@ -121,7 +124,7 @@ class SinglePlayerGame:
         if count == 0:
             self.lives -= 1
         else:
-            self.score += count * 10
+            self.score += count * self.spin_points
         return count
 
     def use_hint(self, free: bool = False) -> Optional[str]:
