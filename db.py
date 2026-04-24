@@ -31,13 +31,13 @@ LEVEL_UP_REWARDS = {
     2:  {"hints": 2, "title": "📚 Первые шаги"},
     3:  {"hints": 2, "title": "✏️ Грамотей"},
     4:  {"hints": 3, "skip_skips": 1, "title": "🔤 Знаток"},
-    5:  {"hints": 3, "title": "💬 Словоблуд"},
+    5:  {"hints": 3, "word_replaces": 1, "title": "💬 Словоблуд"},
     6:  {"hints": 4, "skip_skips": 1, "title": "📖 Книгочей"},
     7:  {"hints": 5, "skip_skips": 2, "title": "🧠 Эрудит"},
-    8:  {"hints": 5, "skip_skips": 2, "title": "🏆 Чемпион"},
+    8:  {"hints": 5, "skip_skips": 2, "word_replaces": 1, "title": "🏆 Чемпион"},
     9:  {"hints": 7, "skip_skips": 3, "title": "⭐ Мастер"},
     10: {"hints": 10, "skip_skips": 3, "title": "👑 Гроссмейстер"},
-    11: {"hints": 15, "skip_skips": 5, "title": "🔥 Легенда"},
+    11: {"hints": 15, "skip_skips": 5, "word_replaces": 2, "title": "🔥 Легенда"},
     12: {"hints": 20, "skip_skips": 7, "title": "💎 Бессмертный"},
 }
 
@@ -75,12 +75,19 @@ def init_db():
             games_played INTEGER DEFAULT 0,
             words_guessed INTEGER DEFAULT 0,
             -- Инвентарь
-            free_hints  INTEGER DEFAULT 1,
-            skip_skips  INTEGER DEFAULT 0,
-            titles      TEXT DEFAULT '[]',
-            active_title TEXT DEFAULT ''
+            free_hints    INTEGER DEFAULT 1,
+            skip_skips    INTEGER DEFAULT 0,
+            word_replaces INTEGER DEFAULT 0,
+            titles        TEXT DEFAULT '[]',
+            active_title  TEXT DEFAULT ''
         )
     """)
+    # Миграция: добавить столбец word_replaces если его нет
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN word_replaces INTEGER DEFAULT 0")
+        conn.commit()
+    except Exception:
+        pass  # Уже существует
     conn.commit()
     conn.close()
 
@@ -96,7 +103,7 @@ def get_user(user_id: int) -> Optional[dict]:
     if not row:
         return None
     cols = ["user_id","username","xp","level","total_score","games_played",
-            "words_guessed","free_hints","skip_skips","titles","active_title"]
+            "words_guessed","free_hints","skip_skips","word_replaces","titles","active_title"]
     d = dict(zip(cols, row))
     d["titles"] = json.loads(d["titles"])
     return d
@@ -137,14 +144,16 @@ def add_score_and_xp(user_id: int, score: int, words: int = 0) -> dict:
     leveled_up   = new_level > old_level
     for lvl in range(old_level + 1, new_level + 1):
         r = LEVEL_UP_REWARDS.get(lvl, {})
-        rewards["hints"]      = rewards.get("hints", 0)      + r.get("hints", 0)
-        rewards["skip_skips"] = rewards.get("skip_skips", 0) + r.get("skip_skips", 0)
+        rewards["hints"]         = rewards.get("hints", 0)         + r.get("hints", 0)
+        rewards["skip_skips"]    = rewards.get("skip_skips", 0)    + r.get("skip_skips", 0)
+        rewards["word_replaces"] = rewards.get("word_replaces", 0) + r.get("word_replaces", 0)
         if "title" in r:
             rewards.setdefault("titles", []).append(r["title"])
 
-    new_hints      = u["free_hints"]      + rewards.get("hints", 0)
-    new_skip_skips = u["skip_skips"]      + rewards.get("skip_skips", 0)
-    new_titles     = u["titles"] + rewards.get("titles", [])
+    new_hints         = u["free_hints"]      + rewards.get("hints", 0)
+    new_skip_skips    = u["skip_skips"]      + rewards.get("skip_skips", 0)
+    new_word_replaces = u["word_replaces"]   + rewards.get("word_replaces", 0)
+    new_titles        = u["titles"] + rewards.get("titles", [])
 
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""
@@ -152,11 +161,11 @@ def add_score_and_xp(user_id: int, score: int, words: int = 0) -> dict:
             xp=?, level=?, total_score=total_score+?,
             games_played=games_played+1,
             words_guessed=words_guessed+?,
-            free_hints=?, skip_skips=?,
+            free_hints=?, skip_skips=?, word_replaces=?,
             titles=?
         WHERE user_id=?
     """, (new_xp, new_level, score, words, new_hints, new_skip_skips,
-          json.dumps(new_titles, ensure_ascii=False), user_id))
+          new_word_replaces, json.dumps(new_titles, ensure_ascii=False), user_id))
     conn.commit()
     conn.close()
 
@@ -207,6 +216,27 @@ def add_skip_skips(user_id: int, amount: int = 1) -> bool:
         return False
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE users SET skip_skips=skip_skips+? WHERE user_id=?", (amount, user_id))
+    conn.commit()
+    conn.close()
+    return True
+
+def use_word_replace(user_id: int) -> bool:
+    u = get_user(user_id)
+    if not u or u.get("word_replaces", 0) <= 0:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET word_replaces=word_replaces-1 WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+def add_word_replaces(user_id: int, amount: int = 1) -> bool:
+    if amount <= 0:
+        return False
+    if not get_user(user_id):
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET word_replaces=word_replaces+? WHERE user_id=?", (amount, user_id))
     conn.commit()
     conn.close()
     return True

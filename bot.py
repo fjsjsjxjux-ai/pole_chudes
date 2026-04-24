@@ -33,7 +33,9 @@ from game_logic import (
 )
 from db import (
     init_db, ensure_user, get_user, add_score_and_xp,
-    use_free_hint, add_free_hints, use_skip_skip, add_skip_skips, set_active_title,
+    use_free_hint, add_free_hints, use_skip_skip, add_skip_skips,
+    use_word_replace, add_word_replaces,
+    set_active_title,
     get_leaderboard_xp, get_leaderboard_score, get_users_count,
     get_user_position_xp, get_user_position_score,
     get_rank_for_xp, get_next_rank,
@@ -65,6 +67,7 @@ class JoinRoom(StatesGroup):
     waiting_room_id = State()
 
 class SinglePlay(StatesGroup):
+    choosing_rounds     = State()
     choosing_difficulty = State()
     choosing_category   = State()
     playing             = State()
@@ -78,7 +81,7 @@ class ProfileState(StatesGroup):
 rooms:        dict[str, GameRoom]         = {}
 single_games: dict[int, SinglePlayerGame] = {}
 # user_id -> (difficulty, category)
-last_single_settings: dict[int, tuple[str, str]] = {}
+last_single_settings: dict[int, tuple[str, str, int]] = {}
 # group_chat_id -> room_id
 group_rooms:  dict[int, str]              = {}
 
@@ -108,6 +111,13 @@ def kb_main_menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🎒 Инвентарь",        callback_data="inventory")],
         [InlineKeyboardButton(text="📊 Рейтинг",          callback_data="leaderboard")],
         [InlineKeyboardButton(text="📖 Правила",          callback_data="rules")],
+    ])
+
+def kb_single_rounds() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=str(i), callback_data=f"srounds_{i}") for i in range(1, 6)],
+        [InlineKeyboardButton(text=str(i), callback_data=f"srounds_{i}") for i in range(6, 11)],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="main_menu")],
     ])
 
 def kb_difficulty(prefix: str = "diff") -> InlineKeyboardMarkup:
@@ -172,14 +182,26 @@ def kb_spin(room: GameRoom, uid: int) -> InlineKeyboardMarkup:
             text=f"💡 Бесплатная подсказка ({u['free_hints']} шт)",
             callback_data="use_free_hint_multi"
         )])
+    if u and u.get("word_replaces", 0) > 0:
+        rows.append([InlineKeyboardButton(
+            text=f"🔄 Заменить слово ({u['word_replaces']} шт)",
+            callback_data=f"word_replace_multi_{room.room_id}"
+        )])
     rows.append([InlineKeyboardButton(text="🏳️ Сдаться", callback_data=f"surrender_{room.room_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def kb_group_active(room_id: str) -> InlineKeyboardMarkup:
+def kb_group_active(room_id: str, uid: int = 0) -> InlineKeyboardMarkup:
     """Кнопки в группе во время активной игры."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏳️ Сдаться", callback_data=f"surrender_{room_id}")],
-    ])
+    rows = []
+    if uid:
+        u = get_user(uid)
+        if u and u.get("word_replaces", 0) > 0:
+            rows.append([InlineKeyboardButton(
+                text=f"🔄 Заменить слово ({u['word_replaces']} шт)",
+                callback_data=f"word_replace_group_{room_id}"
+            )])
+    rows.append([InlineKeyboardButton(text="🏳️ Сдаться", callback_data=f"surrender_{room_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def kb_group_lobby(room_id: str) -> InlineKeyboardMarkup:
     """Кнопки в группе при ожидании игроков."""
@@ -216,7 +238,7 @@ def kb_player_room(room_id: str) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🚪 Выйти из игры", callback_data=f"leave_room_{room_id}")],
     ])
 
-def kb_single_alphabet(used: set, show_free_hint: bool = False) -> InlineKeyboardMarkup:
+def kb_single_alphabet(used: set, show_free_hint: bool = False, show_word_replace: bool = False) -> InlineKeyboardMarkup:
     buttons = []
     row = []
     for i, letter in enumerate(ALPHABET):
@@ -235,6 +257,8 @@ def kb_single_alphabet(used: set, show_free_hint: bool = False) -> InlineKeyboar
     extra.append(InlineKeyboardButton(text="💡 Подсказка (-50 очков)", callback_data="shint"))
     buttons.append(extra)
     buttons.append([InlineKeyboardButton(text="🔤 Назвать слово целиком", callback_data="sguess_word")])
+    if show_word_replace:
+        buttons.append([InlineKeyboardButton(text="🔄 Заменить слово", callback_data="sword_replace")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 # ===========================================================================
@@ -365,7 +389,7 @@ async def send_turn_message(room: GameRoom):
                 room.group_chat_id,
                 status + f"\n\n👉 Ход: <b>{mention(current_uid, current_name)}</b>\n"
                          f"⏰ {TURN_TIMEOUT_SEC} секунд. Напишите букву в чат!",
-                reply_markup=kb_group_active(room.room_id),
+                reply_markup=kb_group_active(room.room_id, current_uid),
             )
             room.group_message_id = sent.message_id
         except Exception as e:
@@ -610,6 +634,8 @@ async def cb_inventory(call: CallbackQuery):
         f"   └ Открывает случайную букву без штрафа\n\n"
         f"🛡 Защита от ПРОПУСКА: <b>{u['skip_skips']}</b>\n"
         f"   └ Автоматически спасает от сектора ПРОПУСК\n\n"
+        f"🔄 Замена слова: <b>{u.get('word_replaces', 0)}</b>\n"
+        f"   └ Заменяет текущее слово на новое (без штрафа)\n\n"
         f"🏷 Титулы: {len(u['titles'])} шт.\n"
         f"   └ {', '.join(u['titles']) if u['titles'] else 'пока нет'}\n\n"
         f"<i>Бонусы получают за повышение уровня!</i>"
@@ -772,7 +798,8 @@ async def cb_rules(call: CallbackQuery):
         "• В одиночной — нажимаешь на кнопки алфавита\n"
         "• Кулдаун 0.5 сек между буквами\n\n"
         "💡 <b>Бесплатные подсказки</b> — открывают букву без штрафа!\n"
-        "🛡 <b>Защита от ПРОПУСКА</b> — срабатывает автоматически.\n\n"
+        "🛡 <b>Защита от ПРОПУСКА</b> — срабатывает автоматически.\n"
+        "🔄 <b>Замена слова</b> — заменяет текущее слово на новое без штрафа.\n\n"
         f"⏰ <b>{TURN_TIMEOUT_SEC} секунд</b> на ход, иначе пропуск!\n\n"
         "📈 <b>Опыт:</b> 100 очков = 10 XP. Повышай уровень, получай бонусы!"
     )
@@ -784,9 +811,19 @@ async def cb_rules(call: CallbackQuery):
 
 @dp.callback_query(F.data == "single_play")
 async def cb_single_play(call: CallbackQuery, state: FSMContext):
+    await state.set_state(SinglePlay.choosing_rounds)
+    await call.message.edit_text(
+        "🎮 <b>Одиночная игра</b>\n\nСколько слов (раундов)?",
+        reply_markup=kb_single_rounds(),
+    )
+
+@dp.callback_query(F.data.startswith("srounds_"), SinglePlay.choosing_rounds)
+async def cb_s_rounds(call: CallbackQuery, state: FSMContext):
+    rounds = int(call.data.split("_")[1])
+    await state.update_data(single_rounds=rounds)
     await state.set_state(SinglePlay.choosing_difficulty)
     await call.message.edit_text(
-        "🎮 <b>Одиночная игра</b>\n\nВыбери сложность:",
+        f"✅ Слов: <b>{rounds}</b>\n\nВыбери сложность:",
         reply_markup=kb_difficulty("sdiff"),
     )
 
@@ -807,25 +844,28 @@ async def cb_s_category(call: CallbackQuery, state: FSMContext):
     data       = await state.get_data()
     difficulty = data["difficulty"]
     category   = random.choice(ALL_CATEGORIES) if cat_raw == "random" else cat_raw
+    total_words = data.get("single_rounds", 5)
 
     uid   = call.from_user.id
     uname = call.from_user.full_name
     ensure_user(uid, uname)
     game  = SinglePlayerGame(uid, difficulty, category)
+    game.total_words = total_words  # применяем выбранное количество
     if not game.load_words():
         await call.message.edit_text("❌ Нет слов для этого выбора.", reply_markup=kb_back_menu())
         return
 
     single_games[uid] = game
-    last_single_settings[uid] = (difficulty, category)
+    last_single_settings[uid] = (difficulty, category, total_words)
     await state.set_state(SinglePlay.playing)
 
     u = get_user(uid)
     has_free = u and u["free_hints"] > 0
+    has_replace = u and u.get("word_replaces", 0) > 0
     status   = build_single_status(game)
     await call.message.edit_text(
         f"🚀 <b>Игра началась!</b>\n\n{status}\n\nНажми букву:",
-        reply_markup=kb_single_alphabet(game.guessed_letters, show_free_hint=has_free),
+        reply_markup=kb_single_alphabet(game.guessed_letters, show_free_hint=has_free, show_word_replace=has_replace),
     )
 
 @dp.callback_query(F.data.startswith("sletter_"), SinglePlay.playing)
@@ -885,6 +925,31 @@ async def cb_s_free_hint(call: CallbackQuery, state: FSMContext):
     await call.answer(f"💡 Бесплатная подсказка: «{letter}» (без штрафа!)", show_alert=True)
     await _s_update(call, game, state)
 
+@dp.callback_query(F.data == "sword_replace", SinglePlay.playing)
+async def cb_s_word_replace(call: CallbackQuery, state: FSMContext):
+    uid  = call.from_user.id
+    game = single_games.get(uid)
+    if not game:
+        await call.answer("Игра не найдена.", show_alert=True)
+        return
+    if not use_word_replace(uid):
+        await call.answer("❌ Замен слова нет!", show_alert=True)
+        return
+    # Загружаем новое слово
+    if not game.next_word(replace=True):
+        await call.answer("Нет доступных слов для замены.", show_alert=True)
+        add_word_replaces(uid, 1)  # вернуть, если не получилось
+        return
+    await call.answer("🔄 Слово заменено!", show_alert=True)
+    u        = get_user(uid)
+    has_free = u and u["free_hints"] > 0
+    has_replace = u and u.get("word_replaces", 0) > 0
+    status   = build_single_status(game)
+    await call.message.edit_text(
+        f"🔄 <b>Слово заменено!</b>\n\n{status}\n\nНажми букву:",
+        reply_markup=kb_single_alphabet(game.guessed_letters, show_free_hint=has_free, show_word_replace=has_replace),
+    )
+
 @dp.callback_query(F.data == "sguess_word", SinglePlay.playing)
 async def cb_s_guess_word_prompt(call: CallbackQuery):
     await call.answer()
@@ -911,9 +976,10 @@ async def msg_s_guess_word(message: Message, state: FSMContext):
             status = build_single_status(game)
             u = get_user(uid)
             has_free = u and u["free_hints"] > 0
+            has_replace = u and u.get("word_replaces", 0) > 0
             await message.answer(
                 f"❌ Неверно!\n\n{status}",
-                reply_markup=kb_single_alphabet(game.guessed_letters, show_free_hint=has_free),
+                reply_markup=kb_single_alphabet(game.guessed_letters, show_free_hint=has_free, show_word_replace=has_replace),
             )
 
 async def _s_update(call: CallbackQuery, game: SinglePlayerGame, state: FSMContext):
@@ -934,10 +1000,11 @@ async def _s_update(call: CallbackQuery, game: SinglePlayerGame, state: FSMConte
     uid      = game.user_id
     u        = get_user(uid)
     has_free = u and u["free_hints"] > 0
+    has_replace = u and u.get("word_replaces", 0) > 0
     status   = build_single_status(game)
     await call.message.edit_text(
         status + "\n\nНажми букву:",
-        reply_markup=kb_single_alphabet(game.guessed_letters, show_free_hint=has_free),
+        reply_markup=kb_single_alphabet(game.guessed_letters, show_free_hint=has_free, show_word_replace=has_replace),
     )
 
 async def _s_next_or_finish(message: Message, game: SinglePlayerGame, state: FSMContext):
@@ -948,10 +1015,11 @@ async def _s_next_or_finish(message: Message, game: SinglePlayerGame, state: FSM
         uid      = game.user_id
         u        = get_user(uid)
         has_free = u and u["free_hints"] > 0
+        has_replace = u and u.get("word_replaces", 0) > 0
         status   = build_single_status(game)
         await message.answer(
             f"➡️ <b>Следующее слово!</b>\n\n{status}\n\nНажми букву:",
-            reply_markup=kb_single_alphabet(game.guessed_letters, show_free_hint=has_free),
+            reply_markup=kb_single_alphabet(game.guessed_letters, show_free_hint=has_free, show_word_replace=has_replace),
         )
     else:
         uid = game.user_id
@@ -972,6 +1040,8 @@ async def _s_next_or_finish(message: Message, game: SinglePlayerGame, state: FSM
                 reward_text += f"💡 +{rewards['hints']} подсказок\n"
             if rewards.get("skip_skips"):
                 reward_text += f"🛡 +{rewards['skip_skips']} защит от пропуска\n"
+            if rewards.get("word_replaces"):
+                reward_text += f"🔄 +{rewards['word_replaces']} замен слова\n"
             if rewards.get("titles"):
                 reward_text += f"🏷 Новый титул: {', '.join(rewards['titles'])}\n"
         await message.answer(
@@ -995,10 +1065,12 @@ async def cb_single_rematch(call: CallbackQuery, state: FSMContext):
     if not settings:
         await call.answer("Нет сохранённых условий. Запусти /single.", show_alert=True)
         return
-    difficulty, category = settings
+    difficulty, category = settings[0], settings[1]
+    total_words = settings[2] if len(settings) > 2 else 5
 
     ensure_user(uid, uname)
     game = SinglePlayerGame(uid, difficulty, category)
+    game.total_words = total_words
     if not game.load_words():
         await call.message.edit_text("❌ Не удалось загрузить слова для этих условий.", reply_markup=kb_back_menu())
         return
@@ -1009,10 +1081,11 @@ async def cb_single_rematch(call: CallbackQuery, state: FSMContext):
 
     u = get_user(uid)
     has_free = u and u["free_hints"] > 0
+    has_replace = u and u.get("word_replaces", 0) > 0
     status = build_single_status(game)
     await call.message.edit_text(
         f"🚀 <b>Игра началась!</b>\n\n{status}\n\nНажми букву:",
-        reply_markup=kb_single_alphabet(game.guessed_letters, show_free_hint=has_free),
+        reply_markup=kb_single_alphabet(game.guessed_letters, show_free_hint=has_free, show_word_replace=has_replace),
     )
 
 # ===========================================================================
@@ -1708,6 +1781,7 @@ async def msg_letter_input(message: Message, state: FSMContext):
     fsm_state = await state.get_state()
     if fsm_state in (
         SinglePlay.playing, SinglePlay.choosing_difficulty, SinglePlay.choosing_category,
+        SinglePlay.choosing_rounds,
         CreateRoom.waiting_players, CreateRoom.waiting_rounds,
         CreateRoom.waiting_difficulty, CreateRoom.waiting_category,
         CreateGroupRoom.waiting_players, CreateGroupRoom.waiting_rounds,
@@ -1736,6 +1810,9 @@ async def msg_letter_input(message: Message, state: FSMContext):
             pass  # Слово целиком — допускаем (угадывание слова)
         else:
             return  # Числа, эмодзи, латиница, смешанный текст — игнорируем
+        # В группе автоматически "крутим барабан" если ещё не раскручен
+        if len(text) == 1 and room.spin_points is None and not room.prize_active:
+            room.spin_points = random.choice([50, 100, 150, 200, 250, 300, 350, 400, 450, 500])
     else:
         room = _find_room_by_player(uid)
 
@@ -2015,6 +2092,59 @@ async def cb_use_free_hint_multi(call: CallbackQuery):
             reply_markup=kb_spin(room, uid),
         )
 
+@dp.callback_query(F.data.startswith("word_replace_multi_"))
+async def cb_word_replace_multi(call: CallbackQuery):
+    uid     = call.from_user.id
+    room_id = call.data[len("word_replace_multi_"):]
+    room    = rooms.get(room_id)
+    if not room or not room.active:
+        await call.answer("Игра не найдена.", show_alert=True)
+        return
+    if room.current_player_id != uid:
+        await call.answer("Сейчас не твой ход!", show_alert=True)
+        return
+    if not use_word_replace(uid):
+        await call.answer("❌ Замен слова нет!", show_alert=True)
+        return
+    room._load_round()
+    room.last_activity = time.time()
+    restart_turn_timer(room)
+    uname  = room.player_names[uid]
+    status = build_round_status(room)
+    await notify_all_in_room(room, f"🔄 <b>{uname}</b> заменил слово!\n\n{status}")
+    await call.answer("🔄 Слово заменено!", show_alert=True)
+    await send_turn_message(room)
+
+@dp.callback_query(F.data.startswith("word_replace_group_"))
+async def cb_word_replace_group(call: CallbackQuery):
+    uid     = call.from_user.id
+    room_id = call.data[len("word_replace_group_"):]
+    room    = rooms.get(room_id)
+    if not room or not room.active:
+        await call.answer("Игра не найдена.", show_alert=True)
+        return
+    if room.current_player_id != uid:
+        await call.answer("Сейчас не твой ход!", show_alert=True)
+        return
+    if not use_word_replace(uid):
+        await call.answer("❌ Замен слова нет!", show_alert=True)
+        return
+    room._load_round()
+    room.last_activity = time.time()
+    restart_turn_timer(room)
+    uname  = room.player_names[uid]
+    status = build_round_status(room)
+    await call.answer("🔄 Слово заменено!", show_alert=True)
+    try:
+        await bot.send_message(
+            room.group_chat_id,
+            f"🔄 <b>{uname}</b> заменил слово!\n\n{status}\n\n"
+            f"👉 Ход: <b>{mention(uid, uname)}</b>\n⏰ {TURN_TIMEOUT_SEC} секунд. Напишите букву в чат!",
+            reply_markup=kb_group_active(room.room_id, uid),
+        )
+    except Exception as e:
+        logger.warning(f"word_replace_group send error: {e}")
+
 @dp.callback_query(F.data == "guess_word_multi")
 async def cb_guess_word_multi(call: CallbackQuery):
     uid  = call.from_user.id
@@ -2100,7 +2230,7 @@ async def finish_game(room: GameRoom):
             await bot.send_message(room.group_chat_id, final_msg, reply_markup=kb_rematch(room.room_id))
         except Exception:
             pass
-        group_rooms.pop(room.group_chat_id, None)
+        # НЕ удаляем group_rooms — чтобы рематч работал и комната оставалась
     else:
         await notify_all_in_room(room, final_msg, reply_markup=kb_rematch(room.room_id))
 
@@ -2116,6 +2246,8 @@ async def finish_game(room: GameRoom):
                 lv_txt += f"💡 +{rewards['hints']} подсказок\n"
             if rewards.get("skip_skips"):
                 lv_txt += f"🛡 +{rewards['skip_skips']} защит\n"
+            if rewards.get("word_replaces"):
+                lv_txt += f"🔄 +{rewards['word_replaces']} замен слова\n"
             if rewards.get("titles"):
                 lv_txt += f"🏷 Новый титул: {', '.join(rewards['titles'])}\n"
             try:

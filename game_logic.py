@@ -99,7 +99,8 @@ class SinglePlayerGame:
             return False
 
         random.shuffle(filtered)
-        self.word_list  = filtered[:self.total_words]
+        # Берём total_words уникальных слов; если их меньше — берём все что есть
+        self.word_list   = filtered[:max(self.total_words, len(filtered))][:self.total_words] if len(filtered) >= self.total_words else filtered
         self.total_words = len(self.word_list)
         self._load_current_word()
         return True
@@ -136,7 +137,28 @@ class SinglePlayerGame:
     def is_word_complete(self) -> bool:
         return all(c in self.guessed_letters or c in (" ", "-") for c in self.word)
 
-    def next_word(self) -> bool:
+    def next_word(self, replace: bool = False) -> bool:
+        """Перейти к следующему слову. Если replace=True — заменить текущее без смены индекса."""
+        if replace:
+            # Найти случайное слово из пула, которого ещё не было в word_list до текущего индекса
+            used_words = {e["word"].upper() for e in self.word_list[:self.word_index - 1]}
+            pool = WORDS_BY_CATEGORY.get(self.category, [])
+            filtered = [
+                w for w in pool
+                if self.min_len <= len(w["word"].replace(" ", "").replace("-", "")) <= self.max_len
+                and w["word"].upper() not in used_words
+                and w["word"].upper() != self.word
+            ]
+            if not filtered:
+                filtered = [w for w in pool if w["word"].upper() != self.word]
+            if not filtered:
+                return False
+            replacement = random.choice(filtered)
+            # Заменяем текущий элемент (word_index уже был инкрементирован, откатываемся на -1)
+            self.word_list[self.word_index - 1] = replacement
+            self.word_index -= 1  # чтобы _load_current_word взял правильный
+            self._load_current_word()
+            return True
         if self.word_index >= len(self.word_list):
             return False
         self._load_current_word()
@@ -261,7 +283,7 @@ class GameRoom:
         self._load_round()
 
     def _get_word_pool(self) -> list[dict]:
-        cfg = DIFFICULTY_SETTINGS[self.difficulty]
+        cfg  = DIFFICULTY_SETTINGS[self.difficulty]
         pool = WORDS_BY_CATEGORY.get(self.current_category, [])
         if not pool:
             for cat_words in WORDS_BY_CATEGORY.values():
@@ -270,7 +292,17 @@ class GameRoom:
             w for w in pool
             if cfg["min_len"] <= len(w["word"].replace(" ", "").replace("-", "")) <= cfg["max_len"]
         ]
-        return filtered if filtered else pool
+        if not filtered:
+            filtered = pool[:]
+        # Дедупликация по слову
+        seen: set[str] = set()
+        deduped = []
+        for w in filtered:
+            key = w.get("word", "").strip().upper()
+            if key and key not in seen:
+                seen.add(key)
+                deduped.append(w)
+        return deduped
 
     def _load_round(self):
         pool = self._get_word_pool()
