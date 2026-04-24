@@ -167,6 +167,7 @@ class GameRoom:
         self.current_round       = 0
         self.current_player_idx  = 0
         self.turn_counter        = 0
+        self.last_activity       = 0.0  # время последней активности (для таймера AFK)
 
         # Текущий раунд
         self.current_word     = ""

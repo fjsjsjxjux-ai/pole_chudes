@@ -153,7 +153,14 @@ def kb_spin(room: GameRoom, uid: int) -> InlineKeyboardMarkup:
             text=f"💡 Бесплатная подсказка ({u['free_hints']} шт)",
             callback_data="use_free_hint_multi"
         )])
+    rows.append([InlineKeyboardButton(text="🏳️ Сдаться", callback_data=f"surrender_{room.room_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def kb_group_active(room_id: str) -> InlineKeyboardMarkup:
+    """Кнопки в группе во время активной игры."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏳️ Сдаться", callback_data=f"surrender_{room_id}")],
+    ])
 
 def kb_group_lobby(room_id: str) -> InlineKeyboardMarkup:
     """Кнопки в группе при ожидании игроков."""
@@ -314,6 +321,8 @@ async def send_turn_message(room: GameRoom):
     status       = build_round_status(room)
     current_uid  = room.current_player_id
     current_name = room.player_names[current_uid]
+    # Обновляем время последней активности для таймера бездействия
+    room.last_activity = time.time()
 
     if room.room_type == "group":
         try:
@@ -321,6 +330,7 @@ async def send_turn_message(room: GameRoom):
                 room.group_chat_id,
                 status + f"\n\n👉 Ход: <b>{mention(current_uid, current_name)}</b>\n"
                          f"⏰ 30 секунд. Напишите букву в чат!",
+                reply_markup=kb_group_active(room.room_id),
             )
             room.group_message_id = sent.message_id
         except Exception as e:
@@ -1377,6 +1387,129 @@ async def cb_group_leave_ls(call: CallbackQuery):
 # ЗАПУСК МУЛЬТИПЛЕЕРНОЙ ИГРЫ
 # ===========================================================================
 
+# ===========================================================================
+# ТАЙМЕР БЕЗДЕЙСТВИЯ (1 час без активности — завершить игру)
+# ===========================================================================
+
+AFK_TIMEOUT = 3600  # 1 час в секундах
+AFK_CHECK_INTERVAL = 600  # проверять каждые 10 минут
+
+async def afk_game_timer(room_id: str):
+    """Завершает игру если никто не активен больше 1 часа."""
+    while True:
+        await asyncio.sleep(AFK_CHECK_INTERVAL)
+        room = rooms.get(room_id)
+        if not room or not room.active:
+            return
+        elapsed = time.time() - room.last_activity
+        if elapsed >= AFK_TIMEOUT:
+            msg = "⏰ <b>Игра завершена из-за бездействия игроков (1 час без активности).</b>"
+            if room.room_type == "group":
+                try:
+                    await bot.send_message(room.group_chat_id, msg)
+                except Exception:
+                    pass
+                group_rooms.pop(room.group_chat_id, None)
+            else:
+                await notify_all_in_room(room, msg)
+            room.active = False
+            return
+
+# ===========================================================================
+# КНОПКА СДАТЬСЯ
+# ===========================================================================
+
+@dp.callback_query(F.data.startswith("surrender_"))
+async def cb_surrender(call: CallbackQuery):
+    """Игрок сдаётся — выходит из активной игры."""
+    room_id = call.data[10:]
+    room    = rooms.get(room_id)
+    uid     = call.from_user.id
+
+    if not room or not room.active:
+        await call.answer("Игра уже завершена.", show_alert=True)
+        return
+    if uid not in room.player_ids:
+        await call.answer("Ты не в этой игре.", show_alert=True)
+        return
+
+    uname = room.player_names[uid]
+    room.player_ids.remove(uid)
+    room.player_names.pop(uid, None)
+
+    surrender_msg = f"🏳️ <b>{uname}</b> сдался и покинул игру."
+
+    # Если остался 1 игрок — он победитель, иначе игра продолжается
+    if len(room.player_ids) == 1:
+        winner_uid  = room.player_ids[0]
+        winner_name = room.player_names[winner_uid]
+        win_msg = (
+            f"{surrender_msg}\n\n"
+            f"🏆 <b>{winner_name}</b> — единственный оставшийся игрок и побеждает!"
+        )
+        if room.room_type == "group":
+            try:
+                await bot.send_message(room.group_chat_id, win_msg)
+            except Exception:
+                pass
+            group_rooms.pop(room.group_chat_id, None)
+        else:
+            await notify_all_in_room(room, win_msg)
+        # Начислить очки победителю
+        sc     = room.scores.get(winner_uid, 0)
+        result = add_score_and_xp(winner_uid, sc, 0)
+        if result.get("leveled_up"):
+            lvl     = result["new_level"]
+            rname   = result["new_rank_name"]
+            try:
+                await bot.send_message(winner_uid, f"🎉 <b>НОВЫЙ УРОВЕНЬ {lvl}!</b> {rname}")
+            except Exception:
+                pass
+        room.active = False
+        await call.answer("Ты сдался. Игра завершена.", show_alert=True)
+        return
+    elif len(room.player_ids) == 0:
+        # Все сдались
+        if room.room_type == "group":
+            try:
+                await bot.send_message(room.group_chat_id, f"{surrender_msg}\n\nВсе игроки покинули игру.")
+            except Exception:
+                pass
+            group_rooms.pop(room.group_chat_id, None)
+        room.active = False
+        await call.answer("Ты сдался.", show_alert=True)
+        return
+
+    # Несколько игроков остались — игра продолжается
+    # Если сдался текущий игрок — передать ход
+    if room.current_player_id == uid:
+        # current_player_idx мог стать невалидным — исправим
+        room.current_player_idx = room.current_player_idx % len(room.player_ids)
+    else:
+        # Корректируем индекс если нужно
+        try:
+            idx = room.player_ids.index(room.current_player_id)
+            room.current_player_idx = idx
+        except ValueError:
+            room.current_player_idx = 0
+
+    cont_msg = f"{surrender_msg}\n\n👥 Игра продолжается! Осталось игроков: {len(room.player_ids)}"
+    if room.room_type == "group":
+        try:
+            await bot.send_message(room.group_chat_id, cont_msg)
+        except Exception:
+            pass
+    else:
+        await notify_all_in_room(room, cont_msg)
+
+    await call.answer("Ты сдался. Игра продолжается без тебя.", show_alert=True)
+
+    if room.current_player_id == uid:
+        await asyncio.sleep(1)
+        await send_turn_message(room)
+
+
+
 async def start_multi_game(room: GameRoom):
     room.start_game()
     players_list = "\n".join([f"{i+1}. {room.player_names[p]}" for i, p in enumerate(room.player_ids)])
@@ -1415,9 +1548,8 @@ async def start_multi_game(room: GameRoom):
 
     await asyncio.sleep(2)
     await send_turn_message(room)
-
-# ===========================================================================
-# МУЛЬТИПЛЕЕР — ВВОД БУКВ ТЕКСТОМ
+    # Запускаем таймер бездействия
+    asyncio.create_task(afk_game_timer(room.room_id))
 # ===========================================================================
 
 @dp.message(F.text & ~F.via_bot)
@@ -1439,6 +1571,20 @@ async def msg_letter_input(message: Message, state: FSMContext):
     if message.chat.type in ("group", "supergroup"):
         room_id = group_rooms.get(message.chat.id)
         room    = rooms.get(room_id) if room_id else None
+        # В группе реагируем ТОЛЬКО на одиночные русские буквы (или полное слово для угадывания)
+        # Обычные сообщения пользователей игнорируем полностью
+        if not room or not room.active:
+            return
+        if room.current_player_id != uid:
+            return
+        # Проверяем что текст — одна буква алфавита или слово (без цифр, смешанного текста и т.д.)
+        if len(text) == 1:
+            if text not in ALPHABET:
+                return  # Не русская буква — игнорируем
+        elif text.isalpha() and all(c in ALPHABET for c in text):
+            pass  # Слово целиком — допускаем (угадывание слова)
+        else:
+            return  # Числа, эмодзи, латиница, смешанный текст — игнорируем
     else:
         room = _find_room_by_player(uid)
 
@@ -1468,6 +1614,7 @@ async def msg_letter_input(message: Message, state: FSMContext):
         return
 
     room.apply_cooldown(uid)
+    room.last_activity = time.time()  # обновляем время активности
     await _handle_multi_letter(message, room, uid, text)
 
 async def _handle_multi_letter(message: Message, room: GameRoom, uid: int, letter: str):
@@ -1758,8 +1905,7 @@ async def finish_game(room: GameRoom):
                 pass
 
     room.active = False
-    await asyncio.sleep(5)
-    rooms.pop(room.room_id, None)
+    # Комната остаётся в памяти — не удаляем, чтобы игроки могли видеть результаты
 
 # ===========================================================================
 # ЗАПУСК
