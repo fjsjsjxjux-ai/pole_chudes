@@ -33,8 +33,10 @@ from game_logic import (
 )
 from db import (
     init_db, ensure_user, get_user, add_score_and_xp,
-    use_free_hint, use_skip_skip, set_active_title,
-    get_leaderboard, get_rank_for_xp, get_next_rank,
+    use_free_hint, add_free_hints, use_skip_skip, add_skip_skips, set_active_title,
+    get_leaderboard_xp, get_leaderboard_score, get_users_count,
+    get_user_position_xp, get_user_position_score,
+    get_rank_for_xp, get_next_rank,
     RANKS
 )
 
@@ -75,8 +77,13 @@ class ProfileState(StatesGroup):
 # ---------------------------------------------------------------------------
 rooms:        dict[str, GameRoom]         = {}
 single_games: dict[int, SinglePlayerGame] = {}
+# user_id -> (difficulty, category)
+last_single_settings: dict[int, tuple[str, str]] = {}
 # group_chat_id -> room_id
 group_rooms:  dict[int, str]              = {}
+
+TURN_TIMEOUT_SEC = 45
+turn_timer_tasks: dict[str, asyncio.Task] = {}
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp  = Dispatcher(storage=MemoryStorage())
@@ -142,6 +149,18 @@ def kb_multi_menu() -> InlineKeyboardMarkup:
 def kb_back_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")],
+    ])
+
+def kb_rematch(room_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔁 Играть ещё (те же условия)", callback_data=f"rematch_{room_id}")],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="main_menu")],
+    ])
+
+def kb_single_rematch() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔁 Играть ещё (те же условия)", callback_data="single_rematch")],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="main_menu")],
     ])
 
 def kb_spin(room: GameRoom, uid: int) -> InlineKeyboardMarkup:
@@ -291,12 +310,28 @@ def _find_any_room_by_player(uid: int) -> Optional[GameRoom]:
 # ТАЙМЕР ХОДА
 # ===========================================================================
 
-async def player_turn_timer(room_id: str, player_id: int, turn_number: int):
-    await asyncio.sleep(30)
+def _cancel_turn_timer(room_id: str):
+    task = turn_timer_tasks.pop(room_id, None)
+    if task and not task.done():
+        task.cancel()
+
+def restart_turn_timer(room: GameRoom):
+    """
+    Перезапускает таймер хода для текущего игрока.
+    Нужен, чтобы не было "время вышло", если игрок активен (крутит/пишет буквы вовремя).
+    """
+    _cancel_turn_timer(room.room_id)
+    room.turn_timer_token += 1
+    token = room.turn_timer_token
+    uid   = room.current_player_id
+    turn_timer_tasks[room.room_id] = asyncio.create_task(player_turn_timer(room.room_id, uid, token))
+
+async def player_turn_timer(room_id: str, player_id: int, token: int):
+    await asyncio.sleep(TURN_TIMEOUT_SEC)
     room = rooms.get(room_id)
     if not room or not room.active:
         return
-    if room.current_player_id != player_id or room.turn_counter != turn_number:
+    if room.current_player_id != player_id or room.turn_timer_token != token:
         return
     name = room.player_names[player_id]
     room.next_player()
@@ -329,7 +364,7 @@ async def send_turn_message(room: GameRoom):
             sent = await bot.send_message(
                 room.group_chat_id,
                 status + f"\n\n👉 Ход: <b>{mention(current_uid, current_name)}</b>\n"
-                         f"⏰ 30 секунд. Напишите букву в чат!",
+                         f"⏰ {TURN_TIMEOUT_SEC} секунд. Напишите букву в чат!",
                 reply_markup=kb_group_active(room.room_id),
             )
             room.group_message_id = sent.message_id
@@ -352,7 +387,7 @@ async def send_turn_message(room: GameRoom):
                 if uid == current_uid:
                     await bot.send_message(
                         uid,
-                        status + f"\n\n🎡 <b>Ваш ход!</b> Крутите барабан!\n⏰ 30 секунд.",
+                        status + f"\n\n🎡 <b>Ваш ход!</b> Крутите барабан!\n⏰ {TURN_TIMEOUT_SEC} секунд.",
                         reply_markup=kb_spin(room, uid),
                     )
                 else:
@@ -363,7 +398,7 @@ async def send_turn_message(room: GameRoom):
             except Exception as e:
                 logger.warning(f"send_turn_message private error {uid}: {e}")
 
-    asyncio.create_task(player_turn_timer(room.room_id, current_uid, room.turn_counter))
+    restart_turn_timer(room)
 
 # ===========================================================================
 # /start, /menu, /single, /multi — команды
@@ -591,30 +626,112 @@ async def cb_inventory(call: CallbackQuery):
 # РЕЙТИНГ
 # ===========================================================================
 
+LEADERBOARD_PAGE_SIZE = 20
+
+def kb_leaderboard_root() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🏆 Топ XP", callback_data="lb_xp10"),
+            InlineKeyboardButton(text="💰 Топ очки", callback_data="lb_score10"),
+        ],
+        [
+            InlineKeyboardButton(text="🌍 XP глобально", callback_data="lb_xp_page_1"),
+            InlineKeyboardButton(text="🌍 Очки глобально", callback_data="lb_score_page_1"),
+        ],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="main_menu")],
+    ])
+
+def kb_leaderboard_pager(metric: str, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(text="⬅️", callback_data=f"lb_{metric}_page_{page-1}"))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton(text="➡️", callback_data=f"lb_{metric}_page_{page+1}"))
+    buttons = []
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton(text="↩️ Назад", callback_data="leaderboard")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+async def _show_leaderboard(call: CallbackQuery, metric: str, limit: int, offset: int, page: Optional[int] = None):
+    uid = call.from_user.id
+    if metric == "xp":
+        rows = get_leaderboard_xp(limit=limit, offset=offset)
+        pos  = get_user_position_xp(uid)
+        title = "XP"
+    else:
+        rows = get_leaderboard_score(limit=limit, offset=offset)
+        pos  = get_user_position_score(uid)
+        title = "очкам"
+
+    lines = []
+    if page is None:
+        lines.append(f"📊 <b>Топ-10 по {title}</b>\n")
+    else:
+        total = get_users_count()
+        total_pages = max(1, (total + LEADERBOARD_PAGE_SIZE - 1) // LEADERBOARD_PAGE_SIZE)
+        lines.append(f"📊 <b>Глобальный рейтинг по {title}</b>\nСтраница <b>{page}/{total_pages}</b>\n")
+
+    medals = ["🥇", "🥈", "🥉"]
+    for i, p in enumerate(rows):
+        absolute_rank = offset + i + 1
+        mark = " 👈" if p["user_id"] == uid else ""
+        if page is None and i < 3:
+            prefix = medals[i]
+        else:
+            prefix = f"{absolute_rank}."
+
+        if metric == "xp":
+            rank = get_rank_for_xp(p["xp"])
+            lines.append(f"{prefix} {p['username']} — <b>{p['xp']}</b> XP  {rank['name']}{mark}")
+        else:
+            lines.append(f"{prefix} {p['username']} — <b>{p['total_score']}</b> очков{mark}")
+
+    if pos:
+        lines.append(f"\n👤 Твоё место: <b>#{pos}</b>")
+
+    if page is None:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="↩️ Назад", callback_data="leaderboard")],
+        ])
+    else:
+        total = get_users_count()
+        total_pages = max(1, (total + LEADERBOARD_PAGE_SIZE - 1) // LEADERBOARD_PAGE_SIZE)
+        kb = kb_leaderboard_pager(metric, page, total_pages)
+
+    await call.message.edit_text("\n".join(lines), reply_markup=kb)
+
 @dp.callback_query(F.data == "leaderboard")
 async def cb_leaderboard(call: CallbackQuery):
-    top  = get_leaderboard(10)
-    uid  = call.from_user.id
-    lines = ["📊 <b>Топ-10 игроков</b>\n"]
-    medals = ["🥇","🥈","🥉"] + [f"{i}." for i in range(4, 11)]
-    for i, p in enumerate(top):
-        rank = get_rank_for_xp(p["xp"])
-        mark = "👈" if p["user_id"] == uid else ""
-        lines.append(f"{medals[i]} {p['username']} — <b>{p['xp']}</b> XP  {rank['name']} {mark}")
+    await call.message.edit_text("📊 <b>Рейтинг</b>\n\nВыбери, что показать:", reply_markup=kb_leaderboard_root())
 
-    from db import DB_PATH
-    import sqlite3
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*)+1 FROM users WHERE xp > (SELECT xp FROM users WHERE user_id=?)", (uid,))
-    pos = c.fetchone()[0]
-    conn.close()
-    lines.append(f"\n👤 Твоё место: <b>#{pos}</b>")
+@dp.callback_query(F.data == "lb_xp10")
+async def cb_lb_xp10(call: CallbackQuery):
+    await _show_leaderboard(call, metric="xp", limit=10, offset=0, page=None)
 
-    await call.message.edit_text(
-        "\n".join(lines),
-        reply_markup=kb_back_menu(),
-    )
+@dp.callback_query(F.data == "lb_score10")
+async def cb_lb_score10(call: CallbackQuery):
+    await _show_leaderboard(call, metric="score", limit=10, offset=0, page=None)
+
+@dp.callback_query(F.data.startswith("lb_xp_page_"))
+async def cb_lb_xp_page(call: CallbackQuery):
+    try:
+        page = int(call.data.split("_")[-1])
+    except Exception:
+        page = 1
+    page = max(1, page)
+    offset = (page - 1) * LEADERBOARD_PAGE_SIZE
+    await _show_leaderboard(call, metric="xp", limit=LEADERBOARD_PAGE_SIZE, offset=offset, page=page)
+
+@dp.callback_query(F.data.startswith("lb_score_page_"))
+async def cb_lb_score_page(call: CallbackQuery):
+    try:
+        page = int(call.data.split("_")[-1])
+    except Exception:
+        page = 1
+    page = max(1, page)
+    offset = (page - 1) * LEADERBOARD_PAGE_SIZE
+    await _show_leaderboard(call, metric="score", limit=LEADERBOARD_PAGE_SIZE, offset=offset, page=page)
 
 # ===========================================================================
 # ГЛАВНОЕ МЕНЮ (callback)
@@ -641,8 +758,13 @@ async def cb_rules(call: CallbackQuery):
         "📖 <b>Правила Поля Чудес</b>\n\n"
         "🎯 <b>Цель:</b> угадать загаданное слово по буквам.\n\n"
         "🎡 <b>Барабан</b> (только в мультиплеере ЛС):\n"
-        "• Очки (50-500) — умножаются на количество букв\n"
+        "• Очки (50-700) — умножаются на количество букв\n"
         "• ⭐ ПРИЗ — удвоение очков раунда\n"
+        "• 🎁 БОНУС — +200 очков раунда\n"
+        "• 💡 ПОДСКАЗКА — +1 бесплатная подсказка\n"
+        "• 🛡 ЩИТ — +1 защита от ПРОПУСКА\n"
+        "• 🎰 ДЖЕКПОТ — +500 при завершении слова\n"
+        "• 🧨 МИНУС — -200 очков раунда\n"
         "• 💀 БАНКРОТ — теряешь очки раунда\n"
         "• ⏩ ПРОПУСК — пропускаешь ход\n\n"
         "🔤 <b>Ввод букв:</b>\n"
@@ -651,7 +773,7 @@ async def cb_rules(call: CallbackQuery):
         "• Кулдаун 0.5 сек между буквами\n\n"
         "💡 <b>Бесплатные подсказки</b> — открывают букву без штрафа!\n"
         "🛡 <b>Защита от ПРОПУСКА</b> — срабатывает автоматически.\n\n"
-        "⏰ <b>30 секунд</b> на ход, иначе пропуск!\n\n"
+        f"⏰ <b>{TURN_TIMEOUT_SEC} секунд</b> на ход, иначе пропуск!\n\n"
         "📈 <b>Опыт:</b> 100 очков = 10 XP. Повышай уровень, получай бонусы!"
     )
     await call.message.edit_text(text, reply_markup=kb_back_menu())
@@ -695,6 +817,7 @@ async def cb_s_category(call: CallbackQuery, state: FSMContext):
         return
 
     single_games[uid] = game
+    last_single_settings[uid] = (difficulty, category)
     await state.set_state(SinglePlay.playing)
 
     u = get_user(uid)
@@ -857,12 +980,40 @@ async def _s_next_or_finish(message: Message, game: SinglePlayerGame, state: FSM
             f"💰 Счёт: <b>{game.score}</b> очков\n"
             f"📈 +{result.get('gained_xp', 0)} XP\n"
             f"{stars}{reward_text}",
-            reply_markup=kb_back_menu(),
+            reply_markup=kb_single_rematch(),
         )
 
 @dp.callback_query(F.data == "used_letter")
 async def cb_used_letter(call: CallbackQuery):
     await call.answer("Уже названа!", show_alert=False)
+
+@dp.callback_query(F.data == "single_rematch")
+async def cb_single_rematch(call: CallbackQuery, state: FSMContext):
+    uid = call.from_user.id
+    uname = call.from_user.full_name
+    settings = last_single_settings.get(uid)
+    if not settings:
+        await call.answer("Нет сохранённых условий. Запусти /single.", show_alert=True)
+        return
+    difficulty, category = settings
+
+    ensure_user(uid, uname)
+    game = SinglePlayerGame(uid, difficulty, category)
+    if not game.load_words():
+        await call.message.edit_text("❌ Не удалось загрузить слова для этих условий.", reply_markup=kb_back_menu())
+        return
+
+    single_games[uid] = game
+    await state.clear()
+    await state.set_state(SinglePlay.playing)
+
+    u = get_user(uid)
+    has_free = u and u["free_hints"] > 0
+    status = build_single_status(game)
+    await call.message.edit_text(
+        f"🚀 <b>Игра началась!</b>\n\n{status}\n\nНажми букву:",
+        reply_markup=kb_single_alphabet(game.guessed_letters, show_free_hint=has_free),
+    )
 
 # ===========================================================================
 # МУЛЬТИПЛЕЕР В ЛС — СОЗДАНИЕ КОМНАТЫ
@@ -1598,7 +1749,9 @@ async def msg_letter_input(message: Message, state: FSMContext):
     if cd > 0:
         return
 
-    if len(text) > 1 and text.isalpha():
+    if len(text) > 1 and text.isalpha() and all(c in ALPHABET for c in text):
+        room.last_activity = time.time()
+        restart_turn_timer(room)
         await _handle_multi_word_guess(message, room, uid, text)
         return
 
@@ -1615,6 +1768,7 @@ async def msg_letter_input(message: Message, state: FSMContext):
 
     room.apply_cooldown(uid)
     room.last_activity = time.time()  # обновляем время активности
+    restart_turn_timer(room)
     await _handle_multi_letter(message, room, uid, text)
 
 async def _handle_multi_letter(message: Message, room: GameRoom, uid: int, letter: str):
@@ -1647,6 +1801,10 @@ async def _handle_multi_letter(message: Message, room: GameRoom, uid: int, lette
         room.prize_active = False
 
         if room.is_round_complete():
+            if getattr(room, "jackpot_active", False):
+                room.round_scores[uid] = room.round_scores.get(uid, 0) + 500
+                room.jackpot_active = False
+                await notify_all_in_room(room, f"🎰 <b>ДЖЕКПОТ!</b> {uname} завершил слово и получает +500 очков раунда!")
             await asyncio.sleep(1)
             await finish_round(room)
         else:
@@ -1691,6 +1849,10 @@ async def _handle_multi_word_guess(message: Message, room: GameRoom, uid: int, g
                 f"🎊 <b>{uname}</b> угадал слово: <b>{room.current_word}</b>!\n"
                 f"+{room.round_scores[uid]} очков!"
             )
+        if getattr(room, "jackpot_active", False):
+            room.round_scores[uid] = room.round_scores.get(uid, 0) + 500
+            room.jackpot_active = False
+            await notify_all_in_room(room, f"🎰 <b>ДЖЕКПОТ!</b> {uname} завершил слово и получает +500 очков раунда!")
         await asyncio.sleep(2)
         await finish_round(room)
     else:
@@ -1719,6 +1881,8 @@ async def cb_spin_wheel(call: CallbackQuery):
         await call.answer("Сейчас не твой ход!", show_alert=True)
         return
     await call.answer()
+    room.last_activity = time.time()
+    restart_turn_timer(room)
 
     sector              = spin_wheel()
     room.current_sector = sector
@@ -1757,6 +1921,53 @@ async def cb_spin_wheel(call: CallbackQuery):
             f"⭐ <b>ПРИЗ!</b> Угадай букву — очки раунда удвоятся!\n\n{status}\n\nНапиши букву в чат:",
         )
 
+    elif sector == "БОНУС":
+        room.round_scores[uid] = room.round_scores.get(uid, 0) + 200
+        status = build_round_status(room)
+        await notify_all_in_room(room, f"🎁 <b>БОНУС!</b> {room.player_names[uid]} получает +200 очков раунда!")
+        await call.message.edit_text(
+            f"🎁 <b>БОНУС!</b> +200 очков раунда.\n\n{status}\n\nМожешь крутить ещё!",
+            reply_markup=kb_spin(room, uid),
+        )
+
+    elif sector == "МИНУС":
+        room.round_scores[uid] = max(0, room.round_scores.get(uid, 0) - 200)
+        status = build_round_status(room)
+        await notify_all_in_room(room, f"🧨 <b>МИНУС!</b> {room.player_names[uid]} теряет 200 очков раунда.")
+        await call.message.edit_text(
+            f"🧨 <b>МИНУС!</b> -200 очков раунда.\n\n{status}\n\nМожешь крутить ещё!",
+            reply_markup=kb_spin(room, uid),
+        )
+
+    elif sector == "ПОДСКАЗКА":
+        add_free_hints(uid, 1)
+        u2 = get_user(uid)
+        status = build_round_status(room)
+        await notify_all_in_room(room, f"💡 <b>ПОДСКАЗКА!</b> {room.player_names[uid]} получает +1 бесплатную подсказку.")
+        await call.message.edit_text(
+            f"💡 <b>ПОДСКАЗКА!</b> +1 бесплатная подсказка (теперь: <b>{u2['free_hints'] if u2 else 0}</b>).\n\n{status}\n\nМожешь крутить ещё!",
+            reply_markup=kb_spin(room, uid),
+        )
+
+    elif sector == "ЩИТ":
+        add_skip_skips(uid, 1)
+        u2 = get_user(uid)
+        status = build_round_status(room)
+        await notify_all_in_room(room, f"🛡 <b>ЩИТ!</b> {room.player_names[uid]} получает +1 защиту от ПРОПУСКА.")
+        await call.message.edit_text(
+            f"🛡 <b>ЩИТ!</b> +1 защита от ПРОПУСКА (теперь: <b>{u2['skip_skips'] if u2 else 0}</b>).\n\n{status}\n\nМожешь крутить ещё!",
+            reply_markup=kb_spin(room, uid),
+        )
+
+    elif sector == "ДЖЕКПОТ":
+        room.jackpot_active = True
+        room.spin_points = 300
+        status = build_round_status(room)
+        await notify_all_in_room(room, f"🎰 <b>ДЖЕКПОТ!</b> {room.player_names[uid]} активировал джекпот (+500 при завершении слова)!\nСтавка: 300 очков за букву.")
+        await call.message.edit_text(
+            f"🎰 <b>ДЖЕКПОТ!</b> +500 очков при завершении слова!\n\n{status}\n\nНапиши букву в чат:",
+        )
+
     else:
         points = int(sector)
         room.spin_points = points
@@ -1779,6 +1990,8 @@ async def cb_use_free_hint_multi(call: CallbackQuery):
     if not u or u["free_hints"] <= 0:
         await call.answer("Бесплатных подсказок нет!", show_alert=True)
         return
+    room.last_activity = time.time()
+    restart_turn_timer(room)
     hidden = [c for c in set(room.current_word) if c.isalpha() and c not in room.guessed_letters]
     if not hidden:
         await call.answer("Все буквы открыты!", show_alert=True)
@@ -1790,6 +2003,10 @@ async def cb_use_free_hint_multi(call: CallbackQuery):
     uname = room.player_names[uid]
     await notify_all_in_room(room, f"💡 <b>{uname}</b> использовал подсказку: буква «{letter}»!")
     if room.is_round_complete():
+        if getattr(room, "jackpot_active", False):
+            room.round_scores[uid] = room.round_scores.get(uid, 0) + 500
+            room.jackpot_active = False
+            await notify_all_in_room(room, f"🎰 <b>ДЖЕКПОТ!</b> {uname} завершил слово и получает +500 очков раунда!")
         await finish_round(room)
     else:
         status = build_round_status(room)
@@ -1809,6 +2026,8 @@ async def cb_guess_word_multi(call: CallbackQuery):
         await call.answer("Не твой ход!", show_alert=True)
         return
     await call.answer()
+    room.last_activity = time.time()
+    restart_turn_timer(room)
     await call.message.answer("🔤 Напиши слово целиком в чат:")
 
 # ===========================================================================
@@ -1878,12 +2097,12 @@ async def finish_game(room: GameRoom):
 
     if room.room_type == "group":
         try:
-            await bot.send_message(room.group_chat_id, final_msg)
+            await bot.send_message(room.group_chat_id, final_msg, reply_markup=kb_rematch(room.room_id))
         except Exception:
             pass
         group_rooms.pop(room.group_chat_id, None)
     else:
-        await notify_all_in_room(room, final_msg)
+        await notify_all_in_room(room, final_msg, reply_markup=kb_rematch(room.room_id))
 
     for uid in room.player_ids:
         sc     = room.scores.get(uid, 0)
@@ -1904,8 +2123,51 @@ async def finish_game(room: GameRoom):
             except Exception:
                 pass
 
+    _cancel_turn_timer(room.room_id)
     room.active = False
     # Комната остаётся в памяти — не удаляем, чтобы игроки могли видеть результаты
+
+def _reset_room_for_rematch(room: GameRoom):
+    _cancel_turn_timer(room.room_id)
+    room.active = False
+    room.current_round = 0
+    room.current_player_idx = 0
+    room.turn_counter = 0
+    room.turn_timer_token = 0
+
+    room.current_category = room.base_category
+    room.guessed_letters = set()
+    room.used_words.clear()
+
+    room.spin_points = None
+    room.prize_active = False
+    room.jackpot_active = False
+
+    for uid in room.player_ids:
+        room.scores[uid] = 0
+        room.round_scores[uid] = 0
+
+@dp.callback_query(F.data.startswith("rematch_"))
+async def cb_rematch(call: CallbackQuery):
+    room_id = call.data.split("_", 1)[1]
+    room = rooms.get(room_id)
+    if not room:
+        await call.answer("Комната не найдена.", show_alert=True)
+        return
+    if room.active:
+        await call.answer("Игра уже идёт.", show_alert=True)
+        return
+    if call.from_user.id != room.host_id:
+        await call.answer("Рематч может запускать только хост.", show_alert=True)
+        return
+
+    _reset_room_for_rematch(room)
+
+    if room.room_type == "group":
+        group_rooms[room.group_chat_id] = room.room_id
+
+    await call.answer("Запускаю рематч!")
+    await start_multi_game(room)
 
 # ===========================================================================
 # ЗАПУСК

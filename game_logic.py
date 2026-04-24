@@ -12,10 +12,19 @@ from words import WORDS_BY_CATEGORY, ALL_CATEGORIES
 ALPHABET = list("АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
 
 WHEEL_SECTORS = [
-    "100", "200", "150", "300", "100", "БАНКРОТ",
-    "250", "50",  "400", "ПРОПУСК", "100", "200",
-    "500", "150", "ПРИЗ",  "300",   "100", "200",
-    "150", "250", "100",   "БАНКРОТ","400","50",
+    # Очки (весом больше, чем событий)
+    "50", "100", "150", "200", "250", "300", "350", "400", "450", "500", "600", "700",
+    "100", "150", "200", "250", "300", "400", "500",
+
+    # События
+    "ПРИЗ", "ПРИЗ",
+    "БОНУС", "БОНУС",
+    "ПОДСКАЗКА",
+    "ЩИТ",
+    "ДЖЕКПОТ",
+    "МИНУС",
+    "ПРОПУСК", "ПРОПУСК",
+    "БАНКРОТ", "БАНКРОТ",
 ]
 
 DIFFICULTY_SETTINGS = {
@@ -78,6 +87,17 @@ class SinglePlayerGame:
             filtered = pool[:]
         if not filtered:
             return False
+
+        # De-duplicate by word so words don't repeat within a single game
+        unique: dict[str, dict] = {}
+        for entry in filtered:
+            key = entry.get("word", "").strip().upper()
+            if key and key not in unique:
+                unique[key] = entry
+        filtered = list(unique.values())
+        if not filtered:
+            return False
+
         random.shuffle(filtered)
         self.word_list  = filtered[:self.total_words]
         self.total_words = len(self.word_list)
@@ -167,6 +187,7 @@ class GameRoom:
         self.current_round       = 0
         self.current_player_idx  = 0
         self.turn_counter        = 0
+        self.turn_timer_token    = 0
         self.last_activity       = 0.0  # время последней активности (для таймера AFK)
 
         # Текущий раунд
@@ -174,10 +195,12 @@ class GameRoom:
         self.current_hint     = ""
         self.current_category = category
         self.guessed_letters: set = set()
+        self.used_words: set[str] = set()
 
         # Состояние хода
         self.spin_points:  Optional[int] = None
         self.prize_active: bool          = False
+        self.jackpot_active: bool        = False
         self.current_sector: str         = ""
 
         # Кулдаун для ввода букв текстом (для комнат и групп)
@@ -229,6 +252,7 @@ class GameRoom:
         self.current_player_idx = (self.current_player_idx + 1) % max(1, len(self.player_ids))
         self.spin_points  = None
         self.prize_active = False
+        self.jackpot_active = False
         self.turn_counter += 1
 
     def start_game(self):
@@ -249,15 +273,24 @@ class GameRoom:
         return filtered if filtered else pool
 
     def _load_round(self):
-        pool  = self._get_word_pool()
-        entry = random.choice(pool) if pool else {"word": "СЛОВО", "hint": "Загаданное слово"}
-        self.current_word    = entry["word"].upper()
+        pool = self._get_word_pool()
+        available = [w for w in pool if w.get("word", "").upper() not in self.used_words] if pool else []
+        if not available and pool:
+            # Если уникальные слова закончились — начинаем новый цикл
+            self.used_words.clear()
+            available = pool
+
+        entry = random.choice(available) if available else {"word": "СЛОВО", "hint": "Загаданное слово"}
+        word_upper = entry.get("word", "СЛОВО").upper()
+        self.used_words.add(word_upper)
+        self.current_word    = word_upper
         self.current_hint    = entry["hint"]
         self.guessed_letters = set()
         for uid in self.player_ids:
             self.round_scores[uid] = 0
         self.spin_points  = None
         self.prize_active = False
+        self.jackpot_active = False
         self.turn_counter += 1
 
     def guess_letter(self, letter: str) -> int:

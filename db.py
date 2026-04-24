@@ -179,12 +179,34 @@ def use_free_hint(user_id: int) -> bool:
     conn.close()
     return True
 
+def add_free_hints(user_id: int, amount: int = 1) -> bool:
+    if amount <= 0:
+        return False
+    if not get_user(user_id):
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET free_hints=free_hints+? WHERE user_id=?", (amount, user_id))
+    conn.commit()
+    conn.close()
+    return True
+
 def use_skip_skip(user_id: int) -> bool:
     u = get_user(user_id)
     if not u or u["skip_skips"] <= 0:
         return False
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE users SET skip_skips=skip_skips-1 WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+def add_skip_skips(user_id: int, amount: int = 1) -> bool:
+    if amount <= 0:
+        return False
+    if not get_user(user_id):
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET skip_skips=skip_skips+? WHERE user_id=?", (amount, user_id))
     conn.commit()
     conn.close()
     return True
@@ -210,3 +232,67 @@ def get_leaderboard(limit: int = 10) -> list[dict]:
     conn.close()
     return [{"user_id": r[0], "username": r[1], "xp": r[2],
              "level": r[3], "total_score": r[4]} for r in rows]
+
+def get_users_count() -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    n = c.fetchone()[0]
+    conn.close()
+    return int(n or 0)
+
+def get_leaderboard_xp(limit: int = 10, offset: int = 0) -> list[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT user_id, username, xp, level, total_score
+        FROM users
+        ORDER BY xp DESC, total_score DESC
+        LIMIT ? OFFSET ?
+    """, (limit, offset))
+    rows = c.fetchall()
+    conn.close()
+    return [{"user_id": r[0], "username": r[1], "xp": r[2],
+             "level": r[3], "total_score": r[4]} for r in rows]
+
+def get_leaderboard_score(limit: int = 10, offset: int = 0) -> list[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        SELECT user_id, username, xp, level, total_score
+        FROM users
+        ORDER BY total_score DESC, xp DESC
+        LIMIT ? OFFSET ?
+    """, (limit, offset))
+    rows = c.fetchall()
+    conn.close()
+    return [{"user_id": r[0], "username": r[1], "xp": r[2],
+             "level": r[3], "total_score": r[4]} for r in rows]
+
+def get_user_position_xp(user_id: int) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT xp FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return 0
+    xp = row[0]
+    c.execute("SELECT COUNT(*)+1 FROM users WHERE xp > ?", (xp,))
+    pos = c.fetchone()[0]
+    conn.close()
+    return int(pos or 0)
+
+def get_user_position_score(user_id: int) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT total_score FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    if not row:
+        conn.close()
+        return 0
+    sc = row[0]
+    c.execute("SELECT COUNT(*)+1 FROM users WHERE total_score > ?", (sc,))
+    pos = c.fetchone()[0]
+    conn.close()
+    return int(pos or 0)
