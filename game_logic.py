@@ -1,30 +1,24 @@
-"""
-game_logic.py - Логика игры Поле Чудес
-"""
-
 import random
 import uuid
 import time
 from typing import Optional
-
 from words import WORDS_BY_CATEGORY, ALL_CATEGORIES
 
 ALPHABET = list("АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
 
 WHEEL_SECTORS = [
-    # Очки (весом больше, чем событий)
-    "50", "100", "150", "200", "250", "300", "350", "400", "450", "500", "600", "700",
-    "100", "150", "200", "250", "300", "400", "500",
-
-    # События
-    "ПРИЗ", "ПРИЗ",
-    "БОНУС", "БОНУС",
+    "50","100","150","200","250","300","350","400","450","500","600","700",
+    "100","150","200","250","300","400","500",
+    "ПРИЗ","ПРИЗ",
+    "БОНУС","БОНУС",
     "ПОДСКАЗКА",
     "ЩИТ",
     "ДЖЕКПОТ",
     "МИНУС",
-    "ПРОПУСК", "ПРОПУСК",
-    "БАНКРОТ", "БАНКРОТ",
+    "ВОРОВСТВО",
+    "ДВОЙНОЙ",
+    "ПРОПУСК","ПРОПУСК",
+    "БАНКРОТ","БАНКРОТ",
 ]
 
 DIFFICULTY_SETTINGS = {
@@ -53,8 +47,6 @@ def format_word_display(word: str, guessed: set) -> str:
 # Одиночная игра
 # ---------------------------------------------------------------------------
 class SinglePlayerGame:
-    TOTAL_WORDS = 5
-
     def __init__(self, user_id: int, difficulty: str, category: str):
         self.user_id    = user_id
         self.difficulty = difficulty
@@ -63,45 +55,41 @@ class SinglePlayerGame:
         self.min_len    = cfg["min_len"]
         self.max_len    = cfg["max_len"]
         self.max_lives  = cfg["lives"]
-        self.total_words = self.TOTAL_WORDS
+        self.total_words = 5
 
-        self.score          = 0
-        self.words_guessed  = 0
-        self.word_index     = 0
-        self.word_list: list[dict] = []
+        self.score         = 0
+        self.words_guessed = 0
+        self.word_index    = 0
+        self.word_list: list = []
 
         self.word            = ""
         self.hint            = ""
         self.guessed_letters: set = set()
         self.lives           = self.max_lives
         self.word_guessed    = False
-        self.spin_points: int = 0  # очков за букву (рандом каждое слово)
+        self.spin_points: int = 0
+        self.errors_this_word = 0  # для достижения perfect_word
 
     def load_words(self) -> bool:
         pool = WORDS_BY_CATEGORY.get(self.category, [])
         filtered = [
             w for w in pool
-            if self.min_len <= len(w["word"].replace(" ", "").replace("-", "")) <= self.max_len
+            if self.min_len <= len(w["word"].replace(" ","").replace("-","")) <= self.max_len
         ]
         if not filtered:
-            # Попробуем без фильтра по длине
             filtered = pool[:]
         if not filtered:
             return False
-
-        # De-duplicate by word so words don't repeat within a single game
-        unique: dict[str, dict] = {}
+        unique: dict = {}
         for entry in filtered:
-            key = entry.get("word", "").strip().upper()
+            key = entry.get("word","").strip().upper()
             if key and key not in unique:
                 unique[key] = entry
         filtered = list(unique.values())
         if not filtered:
             return False
-
         random.shuffle(filtered)
-        # Берём total_words уникальных слов; если их меньше — берём все что есть
-        self.word_list   = filtered[:max(self.total_words, len(filtered))][:self.total_words] if len(filtered) >= self.total_words else filtered
+        self.word_list   = filtered[:self.total_words] if len(filtered) >= self.total_words else filtered
         self.total_words = len(self.word_list)
         self._load_current_word()
         return True
@@ -113,9 +101,9 @@ class SinglePlayerGame:
         self.guessed_letters = set()
         self.lives           = self.max_lives
         self.word_guessed    = False
+        self.errors_this_word = 0
         self.word_index     += 1
-        # Рандомный множитель очков за букву (как барабан)
-        self.spin_points = random.choice([50, 100, 100, 150, 150, 200, 200, 250, 300, 350, 400, 500])
+        self.spin_points = random.choice([50,100,100,150,150,200,200,250,300,350,400,500])
 
     def guess_letter(self, letter: str) -> int:
         letter = letter.upper()
@@ -123,6 +111,7 @@ class SinglePlayerGame:
         count = self.word.count(letter)
         if count == 0:
             self.lives -= 1
+            self.errors_this_word += 1
         else:
             self.score += count * self.spin_points
         return count
@@ -138,28 +127,22 @@ class SinglePlayerGame:
         return letter
 
     def is_word_complete(self) -> bool:
-        return all(c in self.guessed_letters or c in (" ", "-") for c in self.word)
+        return all(c in self.guessed_letters or c in (" ","-") for c in self.word)
 
     def next_word(self, replace: bool = False) -> bool:
-        """Перейти к следующему слову. Если replace=True — заменить текущее без смены индекса."""
         if replace:
-            # Найти случайное слово из пула, которого ещё не было в word_list до текущего индекса
-            used_words = {e["word"].upper() for e in self.word_list[:self.word_index - 1]}
+            used = {e["word"].upper() for e in self.word_list[:self.word_index - 1]}
             pool = WORDS_BY_CATEGORY.get(self.category, [])
-            filtered = [
-                w for w in pool
-                if self.min_len <= len(w["word"].replace(" ", "").replace("-", "")) <= self.max_len
-                and w["word"].upper() not in used_words
-                and w["word"].upper() != self.word
-            ]
+            filtered = [w for w in pool
+                        if self.min_len <= len(w["word"].replace(" ","").replace("-","")) <= self.max_len
+                        and w["word"].upper() not in used and w["word"].upper() != self.word]
             if not filtered:
                 filtered = [w for w in pool if w["word"].upper() != self.word]
             if not filtered:
                 return False
             replacement = random.choice(filtered)
-            # Заменяем текущий элемент (word_index уже был инкрементирован, откатываемся на -1)
             self.word_list[self.word_index - 1] = replacement
-            self.word_index -= 1  # чтобы _load_current_word взял правильный
+            self.word_index -= 1
             self._load_current_word()
             return True
         if self.word_index >= len(self.word_list):
@@ -167,72 +150,117 @@ class SinglePlayerGame:
         self._load_current_word()
         return True
 
+# ---------------------------------------------------------------------------
+# Дуэль (1 на 1, одно слово, кто быстрее)
+# ---------------------------------------------------------------------------
+class DuelGame:
+    def __init__(self, player1_id: int, player1_name: str,
+                 player2_id: int, player2_name: str,
+                 difficulty: str = "medium", category: str = "random"):
+        self.duel_id      = uuid.uuid4().hex[:6].upper()
+        self.p1_id        = player1_id
+        self.p1_name      = player1_name
+        self.p2_id        = player2_id
+        self.p2_name      = player2_name
+        self.difficulty   = difficulty
+        self.category     = category
+        self.active       = True
+        self.winner_id: Optional[int] = None
+        self.started_at   = time.time()
+
+        self.word = ""
+        self.hint = ""
+        self.p1_guessed: set = set()
+        self.p2_guessed: set = set()
+        self.p1_errors  = 0
+        self.p2_errors  = 0
+
+        cfg = DIFFICULTY_SETTINGS[difficulty]
+        self.min_len = cfg["min_len"]
+        self.max_len = cfg["max_len"]
+        self._load_word()
+
+    def _load_word(self):
+        from words import WORDS_BY_CATEGORY, ALL_CATEGORIES
+        cat = self.category if self.category != "random" else random.choice(ALL_CATEGORIES)
+        self.category = cat
+        pool = WORDS_BY_CATEGORY.get(cat, [])
+        filtered = [w for w in pool
+                    if self.min_len <= len(w["word"].replace(" ","").replace("-","")) <= self.max_len]
+        if not filtered:
+            filtered = pool or [{"word":"СЛОВО","hint":"Загаданное слово"}]
+        entry = random.choice(filtered)
+        self.word = entry["word"].upper()
+        self.hint = entry["hint"]
+
+    def guess_letter(self, player_id: int, letter: str) -> int:
+        letter = letter.upper()
+        if player_id == self.p1_id:
+            self.p1_guessed.add(letter)
+        else:
+            self.p2_guessed.add(letter)
+        count = self.word.count(letter)
+        if count == 0:
+            if player_id == self.p1_id: self.p1_errors += 1
+            else: self.p2_errors += 1
+        return count
+
+    def is_complete(self, player_id: int) -> bool:
+        guessed = self.p1_guessed if player_id == self.p1_id else self.p2_guessed
+        return all(c in guessed or c in (" ","-") for c in self.word)
+
+    def guess_word(self, player_id: int, word: str) -> bool:
+        return word.upper() == self.word
+
+    def set_winner(self, player_id: int):
+        self.winner_id = player_id
+        self.active = False
 
 # ---------------------------------------------------------------------------
-# Мультиплеерная комната (работает в ЛС и в группах)
+# Мультиплеерная комната
 # ---------------------------------------------------------------------------
 class GameRoom:
-    """
-    Комната может быть:
-    - type='private': ЛС, управление через inline-кнопки
-    - type='group': группа, буквы пишут текстом, управление через inline
-
-    group_chat_id: ID чата группы (если type='group')
-    group_message_id: ID последнего статусного сообщения в группе
-    """
-
-    def __init__(
-        self,
-        host_id: int,
-        host_name: str,
-        total_rounds: int,
-        max_players: int,  # 0 = неограничено
-        category: str,
-        difficulty: str = "medium",
-        room_type: str = "private",   # 'private' | 'group'
-        group_chat_id: int = 0,
-    ):
+    def __init__(self, host_id: int, host_name: str, total_rounds: int,
+                 max_players: int, category: str, difficulty: str = "medium",
+                 room_type: str = "private", group_chat_id: int = 0,
+                 is_public: bool = False):
         self.room_id        = self._gen_room_id()
         self.host_id        = host_id
         self.total_rounds   = total_rounds
-        self.max_players    = max_players   # 0 = unlimited
+        self.max_players    = max_players
         self.base_category  = category
         self.difficulty     = difficulty
         self.room_type      = room_type
         self.group_chat_id  = group_chat_id
-        self.group_message_id: Optional[int] = None  # для редактирования статуса
+        self.group_message_id: Optional[int] = None
+        self.is_public      = is_public  # True = поиск рандомов
 
-        # Игроки
-        self.player_ids:   list[int]      = []
-        self.player_names: dict[int, str] = {}
-        self.scores:       dict[int, int] = {}
-        self.round_scores: dict[int, int] = {}
+        self.player_ids:   list  = []
+        self.player_names: dict  = {}
+        self.scores:       dict  = {}
+        self.round_scores: dict  = {}
 
-        self.active              = False
-        self.current_round       = 0
-        self.current_player_idx  = 0
-        self.turn_counter        = 0
-        self.turn_timer_token    = 0
-        self.last_activity       = 0.0  # время последней активности (для таймера AFK)
+        self.active             = False
+        self.current_round      = 0
+        self.current_player_idx = 0
+        self.turn_counter       = 0
+        self.turn_timer_token   = 0
+        self.last_activity      = 0.0
+        self.double_round       = False  # активен ли двойной раунд
 
-        # Текущий раунд
         self.current_word     = ""
         self.current_hint     = ""
         self.current_category = category
         self.guessed_letters: set = set()
-        self.used_words: set[str] = set()
+        self.used_words: set = set()
 
-        # Состояние хода
-        self.spin_points:  Optional[int] = None
-        self.prize_active: bool          = False
-        self.jackpot_active: bool        = False
-        self.current_sector: str         = ""
+        self.spin_points:    Optional[int] = None
+        self.prize_active:   bool          = False
+        self.jackpot_active: bool          = False
+        self.current_sector: str           = ""
 
-        # Кулдаун для ввода букв текстом (для комнат и групп)
-        self.letter_cooldowns: dict[int, float] = {}  # user_id -> timestamp
+        self.letter_cooldowns: dict = {}
         self.COOLDOWN_SEC = 0.5
-
-        # Таймер ожидания игроков в группе (5 мин)
         self.join_deadline: float = time.time() + 300
 
         self.add_player(host_id, host_name)
@@ -258,12 +286,10 @@ class GameRoom:
 
     @property
     def current_player_id(self) -> int:
-        if not self.player_ids:
-            return 0
+        if not self.player_ids: return 0
         return self.player_ids[self.current_player_idx % len(self.player_ids)]
 
     def check_cooldown(self, uid: int) -> float:
-        """Возвращает 0 если можно, иначе секунды до конца кулдауна."""
         last = self.letter_cooldowns.get(uid, 0)
         diff = time.time() - last
         if diff < self.COOLDOWN_SEC:
@@ -285,48 +311,49 @@ class GameRoom:
         self.current_round = 1
         self._load_round()
 
-    def _get_word_pool(self) -> list[dict]:
+    def _get_word_pool(self) -> list:
         cfg  = DIFFICULTY_SETTINGS[self.difficulty]
         pool = WORDS_BY_CATEGORY.get(self.current_category, [])
         if not pool:
             for cat_words in WORDS_BY_CATEGORY.values():
                 pool.extend(cat_words)
-        filtered = [
-            w for w in pool
-            if cfg["min_len"] <= len(w["word"].replace(" ", "").replace("-", "")) <= cfg["max_len"]
-        ]
+        filtered = [w for w in pool
+                    if cfg["min_len"] <= len(w["word"].replace(" ","").replace("-","")) <= cfg["max_len"]
+                    and w.get("word","").upper() not in self.used_words]
+        if not filtered:
+            self.used_words.clear()
+            filtered = [w for w in pool
+                        if cfg["min_len"] <= len(w["word"].replace(" ","").replace("-","")) <= cfg["max_len"]]
         if not filtered:
             filtered = pool[:]
-        # Дедупликация по слову
-        seen: set[str] = set()
+        seen: set = set()
         deduped = []
         for w in filtered:
-            key = w.get("word", "").strip().upper()
+            key = w.get("word","").strip().upper()
             if key and key not in seen:
                 seen.add(key)
                 deduped.append(w)
         return deduped
 
     def _load_round(self):
-        pool = self._get_word_pool()
-        available = [w for w in pool if w.get("word", "").upper() not in self.used_words] if pool else []
+        pool      = self._get_word_pool()
+        available = [w for w in pool if w.get("word","").upper() not in self.used_words] if pool else []
         if not available and pool:
-            # Если уникальные слова закончились — начинаем новый цикл
             self.used_words.clear()
             available = pool
-
-        entry = random.choice(available) if available else {"word": "СЛОВО", "hint": "Загаданное слово"}
-        word_upper = entry.get("word", "СЛОВО").upper()
+        entry     = random.choice(available) if available else {"word":"СЛОВО","hint":"Загаданное слово"}
+        word_upper = entry.get("word","СЛОВО").upper()
         self.used_words.add(word_upper)
         self.current_word    = word_upper
         self.current_hint    = entry["hint"]
         self.guessed_letters = set()
+        self.double_round    = False
         for uid in self.player_ids:
             self.round_scores[uid] = 0
-        self.spin_points  = None
-        self.prize_active = False
+        self.spin_points    = None
+        self.prize_active   = False
         self.jackpot_active = False
-        self.turn_counter += 1
+        self.turn_counter  += 1
 
     def guess_letter(self, letter: str) -> int:
         letter = letter.upper()
@@ -334,7 +361,7 @@ class GameRoom:
         return self.current_word.count(letter)
 
     def is_round_complete(self) -> bool:
-        return all(c in self.guessed_letters or c in (" ", "-") for c in self.current_word)
+        return all(c in self.guessed_letters or c in (" ","-") for c in self.current_word)
 
     def has_next_round(self) -> bool:
         return self.current_round < self.total_rounds
@@ -346,6 +373,5 @@ class GameRoom:
 
     @property
     def is_full(self) -> bool:
-        if self.max_players == 0:
-            return False
+        if self.max_players == 0: return False
         return len(self.player_ids) >= self.max_players
