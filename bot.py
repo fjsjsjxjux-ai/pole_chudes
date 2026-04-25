@@ -40,7 +40,7 @@ from db import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8622943091:AAEa19llqG6GVYyh11TzH5lWWoPOYaUG2IU")
 
 # ---------------------------------------------------------------------------
 # FSM States
