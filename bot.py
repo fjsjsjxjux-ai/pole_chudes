@@ -85,6 +85,10 @@ TURN_TIMEOUT_SEC = 45
 turn_timer_tasks: dict[str, asyncio.Task] = {}
 duel_timer_tasks: dict[str, asyncio.Task] = {}
 
+# Short category IDs for callback_data (Telegram limit: 64 bytes)
+CATEGORY_ID_TO_NAME = {str(i): cat for i, cat in enumerate(ALL_CATEGORIES)}
+CATEGORY_NAME_TO_ID = {cat: cid for cid, cat in CATEGORY_ID_TO_NAME.items()}
+
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp  = Dispatcher(storage=MemoryStorage())
 
@@ -132,7 +136,10 @@ def kb_categories(prefix: str = "cat") -> InlineKeyboardMarkup:
     buttons = []
     row = []
     for cat in ALL_CATEGORIES:
-        row.append(InlineKeyboardButton(text=cat, callback_data=f"{prefix}_{cat}"))
+        cat_id = CATEGORY_NAME_TO_ID.get(cat)
+        if cat_id is None:
+            continue
+        row.append(InlineKeyboardButton(text=cat, callback_data=f"{prefix}_{cat_id}"))
         if len(row) == 2:
             buttons.append(row); row = []
     if row: buttons.append(row)
@@ -941,7 +948,10 @@ async def cb_s_category(call: CallbackQuery, state: FSMContext):
     cat_raw    = call.data[5:]
     data       = await state.get_data()
     difficulty = data.get("difficulty", "medium")
-    category   = random.choice(ALL_CATEGORIES) if cat_raw == "random" else cat_raw
+    if cat_raw == "random":
+        category = random.choice(ALL_CATEGORIES)
+    else:
+        category = CATEGORY_ID_TO_NAME.get(cat_raw, cat_raw)
     total_words = data.get("single_rounds", 5)
     uid   = call.from_user.id
     uname = call.from_user.full_name
@@ -1459,7 +1469,10 @@ async def cb_m_difficulty(call: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data.startswith("mcat_"))
 async def cb_m_category(call: CallbackQuery, state: FSMContext):
     cat_raw  = call.data[5:]
-    category = random.choice(ALL_CATEGORIES) if cat_raw == "random" else cat_raw
+    if cat_raw == "random":
+        category = random.choice(ALL_CATEGORIES)
+    else:
+        category = CATEGORY_ID_TO_NAME.get(cat_raw, cat_raw)
     data     = await state.get_data()
     uid      = call.from_user.id
     uname    = call.from_user.full_name
@@ -1605,7 +1618,10 @@ async def cb_gr_difficulty(call: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data.startswith("grcat_"))
 async def cb_gr_category(call: CallbackQuery, state: FSMContext):
     cat_raw  = call.data[6:]
-    category = random.choice(ALL_CATEGORIES) if cat_raw == "random" else cat_raw
+    if cat_raw == "random":
+        category = random.choice(ALL_CATEGORIES)
+    else:
+        category = CATEGORY_ID_TO_NAME.get(cat_raw, cat_raw)
     data     = await state.get_data()
     uid      = call.from_user.id
     uname    = call.from_user.full_name
