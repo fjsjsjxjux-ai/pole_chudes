@@ -920,14 +920,14 @@ async def cb_single_play(call: CallbackQuery, state: FSMContext):
     await state.set_state(SinglePlay.choosing_rounds)
     await call.message.edit_text("🎮 <b>Одиночная игра</b>\n\nСколько слов?", reply_markup=kb_single_rounds())
 
-@dp.callback_query(F.data.startswith("srounds_"), SinglePlay.choosing_rounds)
+@dp.callback_query(F.data.startswith("srounds_"))
 async def cb_s_rounds(call: CallbackQuery, state: FSMContext):
     rounds = int(call.data.split("_")[1])
     await state.update_data(single_rounds=rounds)
     await state.set_state(SinglePlay.choosing_difficulty)
     await call.message.edit_text(f"✅ Слов: <b>{rounds}</b>\n\nВыбери сложность:", reply_markup=kb_difficulty("sdiff"))
 
-@dp.callback_query(F.data.startswith("sdiff_"), SinglePlay.choosing_difficulty)
+@dp.callback_query(F.data.startswith("sdiff_"))
 async def cb_s_difficulty(call: CallbackQuery, state: FSMContext):
     diff = call.data[6:]
     await state.update_data(difficulty=diff)
@@ -936,11 +936,11 @@ async def cb_s_difficulty(call: CallbackQuery, state: FSMContext):
         f"Сложность: <b>{DIFFICULTY_SETTINGS[diff]['label']}</b>\n\nВыбери категорию:",
         reply_markup=kb_categories("scat"))
 
-@dp.callback_query(F.data.startswith("scat_"), SinglePlay.choosing_category)
+@dp.callback_query(F.data.startswith("scat_"))
 async def cb_s_category(call: CallbackQuery, state: FSMContext):
     cat_raw    = call.data[5:]
     data       = await state.get_data()
-    difficulty = data["difficulty"]
+    difficulty = data.get("difficulty", "medium")
     category   = random.choice(ALL_CATEGORIES) if cat_raw == "random" else cat_raw
     total_words = data.get("single_rounds", 5)
     uid   = call.from_user.id
@@ -1413,7 +1413,7 @@ async def cb_create_room(call: CallbackQuery, state: FSMContext):
     await state.set_state(CreateRoom.waiting_rounds)
     await call.message.edit_text("🎯 <b>Создание комнаты</b>\n\nСколько раундов?", reply_markup=kb_rounds("mrooms"))
 
-@dp.callback_query(F.data.startswith("mrooms_"), CreateRoom.waiting_rounds)
+@dp.callback_query(F.data.startswith("mrooms_"))
 async def cb_m_rounds(call: CallbackQuery, state: FSMContext):
     rounds = int(call.data.split("_")[1])
     await state.update_data(rounds=rounds)
@@ -1430,7 +1430,7 @@ async def cb_m_rounds(call: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="🏠 Меню", callback_data="main_menu")],
         ]))
 
-@dp.callback_query(F.data.startswith("mplayers_"), CreateRoom.waiting_players)
+@dp.callback_query(F.data.startswith("mplayers_"))
 async def cb_m_players_btn(call: CallbackQuery, state: FSMContext):
     await state.update_data(max_players=int(call.data.split("_")[1]))
     await state.set_state(CreateRoom.waiting_difficulty)
@@ -1447,7 +1447,7 @@ async def msg_m_players(message: Message, state: FSMContext):
     await state.set_state(CreateRoom.waiting_difficulty)
     await message.answer("🎯 Выбери сложность:", reply_markup=kb_difficulty("mdiff"))
 
-@dp.callback_query(F.data.startswith("mdiff_"), CreateRoom.waiting_difficulty)
+@dp.callback_query(F.data.startswith("mdiff_"))
 async def cb_m_difficulty(call: CallbackQuery, state: FSMContext):
     diff = call.data[6:]
     await state.update_data(difficulty=diff)
@@ -1456,7 +1456,7 @@ async def cb_m_difficulty(call: CallbackQuery, state: FSMContext):
         f"Сложность: <b>{DIFFICULTY_SETTINGS[diff]['label']}</b>\n\nВыбери категорию:",
         reply_markup=kb_categories("mcat"))
 
-@dp.callback_query(F.data.startswith("mcat_"), CreateRoom.waiting_category)
+@dp.callback_query(F.data.startswith("mcat_"))
 async def cb_m_category(call: CallbackQuery, state: FSMContext):
     cat_raw  = call.data[5:]
     category = random.choice(ALL_CATEGORIES) if cat_raw == "random" else cat_raw
@@ -1464,9 +1464,12 @@ async def cb_m_category(call: CallbackQuery, state: FSMContext):
     uid      = call.from_user.id
     uname    = call.from_user.full_name
     ensure_user(uid, uname)
-    room = GameRoom(host_id=uid, host_name=uname, total_rounds=data["rounds"],
-                    max_players=data["max_players"], category=category,
-                    difficulty=data["difficulty"], room_type="private")
+    rounds = data.get("rounds", 3)
+    max_players = data.get("max_players", 2)
+    difficulty = data.get("difficulty", "medium")
+    room = GameRoom(host_id=uid, host_name=uname, total_rounds=rounds,
+                    max_players=max_players, category=category,
+                    difficulty=difficulty, room_type="private")
     rooms[room.room_id] = room
     await state.clear()
     await call.message.edit_text(
@@ -1557,7 +1560,7 @@ async def cb_group_create_start(call: CallbackQuery, state: FSMContext):
     await state.set_state(CreateGroupRoom.waiting_rounds)
     await call.message.edit_text("🎯 <b>Создание игры</b>\n\nСколько раундов?", reply_markup=kb_rounds("grrooms"))
 
-@dp.callback_query(F.data.startswith("grrooms_"), CreateGroupRoom.waiting_rounds)
+@dp.callback_query(F.data.startswith("grrooms_"))
 async def cb_gr_rounds(call: CallbackQuery, state: FSMContext):
     rounds = int(call.data.split("_")[1])
     await state.update_data(rounds=rounds)
@@ -1572,7 +1575,7 @@ async def cb_gr_rounds(call: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="🏠 Меню", callback_data="main_menu")],
         ]))
 
-@dp.callback_query(F.data.startswith("grplayers_"), CreateGroupRoom.waiting_players)
+@dp.callback_query(F.data.startswith("grplayers_"))
 async def cb_gr_players_btn(call: CallbackQuery, state: FSMContext):
     await state.update_data(max_players=int(call.data.split("_")[1]))
     await state.set_state(CreateGroupRoom.waiting_difficulty)
@@ -1590,7 +1593,7 @@ async def msg_gr_players(message: Message, state: FSMContext):
     await state.set_state(CreateGroupRoom.waiting_difficulty)
     await message.answer("🎯 Выбери сложность:", reply_markup=kb_difficulty("grdiff"))
 
-@dp.callback_query(F.data.startswith("grdiff_"), CreateGroupRoom.waiting_difficulty)
+@dp.callback_query(F.data.startswith("grdiff_"))
 async def cb_gr_difficulty(call: CallbackQuery, state: FSMContext):
     diff = call.data[7:]
     await state.update_data(difficulty=diff)
@@ -1599,7 +1602,7 @@ async def cb_gr_difficulty(call: CallbackQuery, state: FSMContext):
         f"Сложность: <b>{DIFFICULTY_SETTINGS[diff]['label']}</b>\n\nВыбери категорию:",
         reply_markup=kb_categories("grcat"))
 
-@dp.callback_query(F.data.startswith("grcat_"), CreateGroupRoom.waiting_category)
+@dp.callback_query(F.data.startswith("grcat_"))
 async def cb_gr_category(call: CallbackQuery, state: FSMContext):
     cat_raw  = call.data[6:]
     category = random.choice(ALL_CATEGORIES) if cat_raw == "random" else cat_raw
@@ -1613,9 +1616,12 @@ async def cb_gr_category(call: CallbackQuery, state: FSMContext):
         if old in rooms:
             await call.message.edit_text(f"❌ В группе уже есть комната! <code>{old}</code>")
             await state.clear(); return
-    room = GameRoom(host_id=uid, host_name=uname, total_rounds=data["rounds"],
-                    max_players=data.get("max_players",0), category=category,
-                    difficulty=data["difficulty"], room_type="group", group_chat_id=chat_id)
+    rounds = data.get("rounds", 3)
+    max_players = data.get("max_players", 0)
+    difficulty = data.get("difficulty", "medium")
+    room = GameRoom(host_id=uid, host_name=uname, total_rounds=rounds,
+                    max_players=max_players, category=category,
+                    difficulty=difficulty, room_type="group", group_chat_id=chat_id)
     rooms[room.room_id]  = room
     group_rooms[chat_id] = room.room_id
     await state.clear()
