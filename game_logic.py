@@ -1,377 +1,356 @@
-import random
-import uuid
+import sqlite3
+import json
+import os
 import time
 from typing import Optional
-from words import WORDS_BY_CATEGORY, ALL_CATEGORIES
 
-ALPHABET = list("АБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
+DB_PATH = os.getenv("DB_PATH", "game_data.db")
 
-WHEEL_SECTORS = [
-    "50","100","150","200","250","300","350","400","450","500","600","700",
-    "100","150","200","250","300","400","500",
-    "ПРИЗ","ПРИЗ",
-    "БОНУС","БОНУС",
-    "ПОДСКАЗКА",
-    "ЩИТ",
-    "ДЖЕКПОТ",
-    "МИНУС",
-    "ВОРОВСТВО",
-    "ДВОЙНОЙ",
-    "ПРОПУСК","ПРОПУСК",
-    "БАНКРОТ","БАНКРОТ",
+RANKS = [
+    {"level": 1,  "name": "🌱 Новичок",        "xp_needed": 0},
+    {"level": 2,  "name": "📚 Ученик",          "xp_needed": 100},
+    {"level": 3,  "name": "✏️ Грамотей",        "xp_needed": 250},
+    {"level": 4,  "name": "🔤 Знаток букв",     "xp_needed": 500},
+    {"level": 5,  "name": "💬 Словоблуд",       "xp_needed": 900},
+    {"level": 6,  "name": "📖 Книгочей",        "xp_needed": 1400},
+    {"level": 7,  "name": "🧠 Эрудит",          "xp_needed": 2000},
+    {"level": 8,  "name": "🏆 Чемпион слов",    "xp_needed": 3000},
+    {"level": 9,  "name": "⭐ Мастер",          "xp_needed": 4500},
+    {"level": 10, "name": "👑 Гроссмейстер",    "xp_needed": 7000},
+    {"level": 11, "name": "🔥 Легенда",         "xp_needed": 10000},
+    {"level": 12, "name": "💎 Бессмертный",     "xp_needed": 15000},
 ]
 
-DIFFICULTY_SETTINGS = {
-    "easy":   {"min_len": 3,  "max_len": 5,  "lives": 7, "label": "🟢 Лёгкий"},
-    "medium": {"min_len": 6,  "max_len": 8,  "lives": 5, "label": "🟡 Средний"},
-    "hard":   {"min_len": 9,  "max_len": 99, "lives": 4, "label": "🔴 Сложный"},
+LEVEL_UP_REWARDS = {
+    2:  {"hints": 2, "title": "📚 Первые шаги"},
+    3:  {"hints": 2, "title": "✏️ Грамотей"},
+    4:  {"hints": 3, "skip_skips": 1, "title": "🔤 Знаток"},
+    5:  {"hints": 3, "word_replaces": 1, "title": "💬 Словоблуд"},
+    6:  {"hints": 4, "skip_skips": 1, "title": "📖 Книгочей"},
+    7:  {"hints": 5, "skip_skips": 2, "title": "🧠 Эрудит"},
+    8:  {"hints": 5, "skip_skips": 2, "word_replaces": 1, "title": "🏆 Чемпион"},
+    9:  {"hints": 7, "skip_skips": 3, "title": "⭐ Мастер"},
+    10: {"hints": 10, "skip_skips": 3, "title": "👑 Гроссмейстер"},
+    11: {"hints": 15, "skip_skips": 5, "word_replaces": 2, "title": "🔥 Легенда"},
+    12: {"hints": 20, "skip_skips": 7, "word_replaces": 2, "title": "💎 Бессмертный"},
 }
 
-def spin_wheel() -> str:
-    return random.choice(WHEEL_SECTORS)
+STREAK_REWARDS = {
+    3:  {"coins": 50,   "msg": "🔥 3 дня подряд! +50 монет"},
+    7:  {"coins": 150,  "msg": "🔥 7 дней подряд! +150 монет"},
+    14: {"coins": 400,  "msg": "🔥 2 недели подряд! +400 монет"},
+    30: {"coins": 1000, "msg": "🔥 30 дней подряд! +1000 монет"},
+}
 
-def format_word_display(word: str, guessed: set) -> str:
-    result = []
-    for char in word:
-        if char == " ":
-            result.append("  ")
-        elif char == "-":
-            result.append("-")
-        elif char.upper() in guessed:
-            result.append(char.upper())
+SHOP_ITEMS = {
+    "hint":             {"name": "💡 Подсказка",           "price": 150,  "desc": "Открывает случайную букву"},
+    "shield":           {"name": "🛡 Защита от пропуска",  "price": 250,  "desc": "Спасает от сектора ПРОПУСК"},
+    "bankrupt_shield":  {"name": "💎 Защита от банкрота",  "price": 400,  "desc": "Спасает от сектора БАНКРОТ — очки не сгорят!"},
+    "replace":          {"name": "🔄 Замена слова",        "price": 450,  "desc": "Заменяет слово без штрафа"},
+}
+
+ACHIEVEMENTS = {
+    "first_word":   {"name": "🎯 Первое слово",      "desc": "Угадай первое слово"},
+    "streak_3":     {"name": "🔥 Три дня",           "desc": "3 дня подряд в игре"},
+    "streak_7":     {"name": "⚡ Неделя",            "desc": "7 дней подряд в игре"},
+    "words_10":     {"name": "📖 Читатель",          "desc": "Угадай 10 слов"},
+    "words_50":     {"name": "📚 Книжный червь",     "desc": "Угадай 50 слов"},
+    "words_100":    {"name": "🏆 Словарь",           "desc": "Угадай 100 слов"},
+    "score_1000":   {"name": "💰 Тысячник",          "desc": "Набери 1000+ очков за игру"},
+    "score_5000":   {"name": "💎 Богач",             "desc": "Набери 5000+ очков за игру"},
+    "rich":         {"name": "🏦 Банкир",            "desc": "Накопи 10000 монет"},
+    "thief":        {"name": "🦊 Лисица",            "desc": "Укради очки у соперника"},
+    "double_win":   {"name": "✌️ Двойная ставка",   "desc": "Выиграй двойной раунд"},
+    "perfect_word": {"name": "✨ Перфекционист",     "desc": "Угадай слово без ошибок"},
+    "gift_sent":    {"name": "🎁 Щедрая душа",       "desc": "Подари предмет другу"},
+    "duel_win":     {"name": "⚔️ Дуэлянт",          "desc": "Победи в дуэльном режиме"},
+}
+
+def get_rank_for_xp(xp: int) -> dict:
+    current = RANKS[0]
+    for rank in RANKS:
+        if xp >= rank["xp_needed"]:
+            current = rank
         else:
-            result.append("_")
-    return " ".join(result)
+            break
+    return current
 
-# ---------------------------------------------------------------------------
-# Одиночная игра
-# ---------------------------------------------------------------------------
-class SinglePlayerGame:
-    def __init__(self, user_id: int, difficulty: str, category: str):
-        self.user_id    = user_id
-        self.difficulty = difficulty
-        self.category   = category
-        cfg             = DIFFICULTY_SETTINGS[difficulty]
-        self.min_len    = cfg["min_len"]
-        self.max_len    = cfg["max_len"]
-        self.max_lives  = cfg["lives"]
-        self.total_words = 5
+def get_next_rank(xp: int) -> Optional[dict]:
+    for rank in RANKS:
+        if rank["xp_needed"] > xp:
+            return rank
+    return None
 
-        self.score         = 0
-        self.words_guessed = 0
-        self.word_index    = 0
-        self.word_list: list = []
+def xp_for_score(score: int) -> int:
+    return score // 10
 
-        self.word            = ""
-        self.hint            = ""
-        self.guessed_letters: set = set()
-        self.lives           = self.max_lives
-        self.word_guessed    = False
-        self.spin_points: int = 0
-        self.errors_this_word = 0  # для достижения perfect_word
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id       INTEGER PRIMARY KEY,
+            username      TEXT,
+            xp            INTEGER DEFAULT 0,
+            level         INTEGER DEFAULT 1,
+            total_score   INTEGER DEFAULT 0,
+            games_played  INTEGER DEFAULT 0,
+            words_guessed INTEGER DEFAULT 0,
+            free_hints    INTEGER DEFAULT 1,
+            skip_skips    INTEGER DEFAULT 0,
+            word_replaces    INTEGER DEFAULT 0,
+            bankrupt_shields INTEGER DEFAULT 0,
+            titles           TEXT DEFAULT '[]',
+            active_title     TEXT DEFAULT '',
+            coins            INTEGER DEFAULT 0,
+            streak           INTEGER DEFAULT 0,
+            last_visit       INTEGER DEFAULT 0,
+            achievements     TEXT DEFAULT '[]'
+        )
+    """)
+    for col, typ, defval in [
+        ("word_replaces",    "INTEGER", "0"),
+        ("bankrupt_shields", "INTEGER", "0"),
+        ("coins",            "INTEGER", "0"),
+        ("streak",           "INTEGER", "0"),
+        ("last_visit",       "INTEGER", "0"),
+        ("achievements",     "TEXT",    "'[]'"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE users ADD COLUMN {col} {typ} DEFAULT {defval}")
+            conn.commit()
+        except Exception:
+            pass
+    conn.commit()
+    conn.close()
 
-    def load_words(self) -> bool:
-        pool = WORDS_BY_CATEGORY.get(self.category, [])
-        filtered = [
-            w for w in pool
-            if self.min_len <= len(w["word"].replace(" ","").replace("-","")) <= self.max_len
-        ]
-        if not filtered:
-            filtered = pool[:]
-        if not filtered:
-            return False
-        unique: dict = {}
-        for entry in filtered:
-            key = entry.get("word","").strip().upper()
-            if key and key not in unique:
-                unique[key] = entry
-        filtered = list(unique.values())
-        if not filtered:
-            return False
-        random.shuffle(filtered)
-        self.word_list   = filtered[:self.total_words] if len(filtered) >= self.total_words else filtered
-        self.total_words = len(self.word_list)
-        self._load_current_word()
-        return True
+def _row_to_user(row) -> dict:
+    cols = ["user_id","username","xp","level","total_score","games_played",
+            "words_guessed","free_hints","skip_skips","word_replaces",
+            "bankrupt_shields","titles","active_title","coins","streak","last_visit","achievements"]
+    row = list(row) + [None] * (len(cols) - len(row))
+    d = dict(zip(cols, row))
+    d["titles"]       = json.loads(d["titles"] or "[]")
+    d["achievements"] = json.loads(d["achievements"] or "[]")
+    d["coins"]        = d["coins"] or 0
+    d["streak"]       = d["streak"] or 0
+    d["last_visit"]   = d["last_visit"] or 0
+    d["word_replaces"]    = d["word_replaces"] or 0
+    d["bankrupt_shields"] = d["bankrupt_shields"] or 0
+    return d
 
-    def _load_current_word(self):
-        entry                = self.word_list[self.word_index]
-        self.word            = entry["word"].upper()
-        self.hint            = entry["hint"]
-        self.guessed_letters = set()
-        self.lives           = self.max_lives
-        self.word_guessed    = False
-        self.errors_this_word = 0
-        self.word_index     += 1
-        self.spin_points = random.choice([50,100,100,150,150,200,200,250,300,350,400,500])
+def get_user(user_id: int) -> Optional[dict]:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return _row_to_user(row) if row else None
 
-    def guess_letter(self, letter: str) -> int:
-        letter = letter.upper()
-        self.guessed_letters.add(letter)
-        count = self.word.count(letter)
-        if count == 0:
-            self.lives -= 1
-            self.errors_this_word += 1
-        else:
-            self.score += count * self.spin_points
-        return count
+def ensure_user(user_id: int, username: str) -> dict:
+    u = get_user(user_id)
+    if u:
+        conn = sqlite3.connect(DB_PATH)
+        conn.execute("UPDATE users SET username=? WHERE user_id=?", (username, user_id))
+        conn.commit(); conn.close()
+        u["username"] = username
+        return u
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("INSERT INTO users (user_id, username) VALUES (?,?)", (user_id, username))
+    conn.commit(); conn.close()
+    return get_user(user_id)
 
-    def use_hint(self, free: bool = False) -> Optional[str]:
-        hidden = [c for c in set(self.word) if c.isalpha() and c not in self.guessed_letters]
-        if not hidden:
-            return None
-        letter = random.choice(hidden)
-        if not free:
-            self.score = max(0, self.score - 50)
-        self.guessed_letters.add(letter)
-        return letter
+def daily_checkin(user_id: int) -> dict:
+    u = get_user(user_id)
+    if not u:
+        return {}
+    now   = int(time.time())
+    today = now // 86400
+    last  = (u["last_visit"] or 0) // 86400
+    diff  = today - last
+    if diff == 0:
+        return {"streak": u["streak"], "bonus_coins": 0, "is_new": False}
+    new_streak   = (u["streak"] + 1) if diff == 1 else 1
+    daily_coins  = 20 + min((new_streak - 1) * 5, 80)
+    streak_bonus = 0
+    streak_msg   = ""
+    for days, reward in STREAK_REWARDS.items():
+        if new_streak == days:
+            streak_bonus = reward["coins"]
+            streak_msg   = reward["msg"]
+    total = daily_coins + streak_bonus
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET streak=?, last_visit=?, coins=coins+? WHERE user_id=?",
+                 (new_streak, now, total, user_id))
+    conn.commit(); conn.close()
+    return {"streak": new_streak, "bonus_coins": total, "daily_coins": daily_coins,
+            "streak_bonus": streak_bonus, "streak_msg": streak_msg, "is_new": True}
 
-    def is_word_complete(self) -> bool:
-        return all(c in self.guessed_letters or c in (" ","-") for c in self.word)
+def grant_achievement(user_id: int, key: str) -> bool:
+    u = get_user(user_id)
+    if not u or key in u["achievements"]:
+        return False
+    new_list = u["achievements"] + [key]
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET achievements=? WHERE user_id=?",
+                 (json.dumps(new_list, ensure_ascii=False), user_id))
+    conn.commit(); conn.close()
+    return True
 
-    def next_word(self, replace: bool = False) -> bool:
-        if replace:
-            used = {e["word"].upper() for e in self.word_list[:self.word_index - 1]}
-            pool = WORDS_BY_CATEGORY.get(self.category, [])
-            filtered = [w for w in pool
-                        if self.min_len <= len(w["word"].replace(" ","").replace("-","")) <= self.max_len
-                        and w["word"].upper() not in used and w["word"].upper() != self.word]
-            if not filtered:
-                filtered = [w for w in pool if w["word"].upper() != self.word]
-            if not filtered:
-                return False
-            replacement = random.choice(filtered)
-            self.word_list[self.word_index - 1] = replacement
-            self.word_index -= 1
-            self._load_current_word()
-            return True
-        if self.word_index >= len(self.word_list):
-            return False
-        self._load_current_word()
-        return True
+def add_coins(user_id: int, amount: int) -> bool:
+    if not get_user(user_id) or amount <= 0: return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET coins=coins+? WHERE user_id=?", (amount, user_id))
+    conn.commit(); conn.close(); return True
 
-# ---------------------------------------------------------------------------
-# Дуэль (1 на 1, одно слово, кто быстрее)
-# ---------------------------------------------------------------------------
-class DuelGame:
-    def __init__(self, player1_id: int, player1_name: str,
-                 player2_id: int, player2_name: str,
-                 difficulty: str = "medium", category: str = "random"):
-        self.duel_id      = uuid.uuid4().hex[:6].upper()
-        self.p1_id        = player1_id
-        self.p1_name      = player1_name
-        self.p2_id        = player2_id
-        self.p2_name      = player2_name
-        self.difficulty   = difficulty
-        self.category     = category
-        self.active       = True
-        self.winner_id: Optional[int] = None
-        self.started_at   = time.time()
+def spend_coins(user_id: int, amount: int) -> bool:
+    u = get_user(user_id)
+    if not u or u["coins"] < amount: return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET coins=coins-? WHERE user_id=?", (amount, user_id))
+    conn.commit(); conn.close(); return True
 
-        self.word = ""
-        self.hint = ""
-        self.p1_guessed: set = set()
-        self.p2_guessed: set = set()
-        self.p1_errors  = 0
-        self.p2_errors  = 0
+def steal_coins_from(victim_id: int, amount: int) -> int:
+    u = get_user(victim_id)
+    if not u: return 0
+    stolen = min(amount, u["coins"])
+    if stolen <= 0: return 0
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET coins=coins-? WHERE user_id=?", (stolen, victim_id))
+    conn.commit(); conn.close()
+    return stolen
 
-        cfg = DIFFICULTY_SETTINGS[difficulty]
-        self.min_len = cfg["min_len"]
-        self.max_len = cfg["max_len"]
-        self._load_word()
+def add_score_and_xp(user_id: int, score: int, words: int = 0) -> dict:
+    u = get_user(user_id)
+    if not u: return {}
+    gained_xp  = xp_for_score(score)
+    old_level  = u["level"]
+    new_xp     = u["xp"] + gained_xp
+    new_rank   = get_rank_for_xp(new_xp)
+    new_level  = new_rank["level"]
+    leveled_up = new_level > old_level
+    rewards = {}
+    for lvl in range(old_level + 1, new_level + 1):
+        r = LEVEL_UP_REWARDS.get(lvl, {})
+        rewards["hints"]         = rewards.get("hints", 0)         + r.get("hints", 0)
+        rewards["skip_skips"]    = rewards.get("skip_skips", 0)    + r.get("skip_skips", 0)
+        rewards["word_replaces"] = rewards.get("word_replaces", 0) + r.get("word_replaces", 0)
+        if "title" in r:
+            rewards.setdefault("titles", []).append(r["title"])
+    new_hints    = u["free_hints"]    + rewards.get("hints", 0)
+    new_skips    = u["skip_skips"]    + rewards.get("skip_skips", 0)
+    new_replaces = u["word_replaces"] + rewards.get("word_replaces", 0)
+    new_titles   = u["titles"] + rewards.get("titles", [])
+    earned_coins = score // 10
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("""
+        UPDATE users SET
+            xp=?, level=?, total_score=total_score+?,
+            games_played=games_played+1, words_guessed=words_guessed+?,
+            free_hints=?, skip_skips=?, word_replaces=?,
+            titles=?, coins=coins+?
+        WHERE user_id=?
+    """, (new_xp, new_level, score, words, new_hints, new_skips, new_replaces,
+          json.dumps(new_titles, ensure_ascii=False), earned_coins, user_id))
+    conn.commit(); conn.close()
+    return {"gained_xp": gained_xp, "leveled_up": leveled_up,
+            "old_level": old_level, "new_level": new_level,
+            "new_rank_name": new_rank["name"], "rewards": rewards,
+            "earned_coins": earned_coins}
 
-    def _load_word(self):
-        from words import WORDS_BY_CATEGORY, ALL_CATEGORIES
-        cat = self.category if self.category != "random" else random.choice(ALL_CATEGORIES)
-        self.category = cat
-        pool = WORDS_BY_CATEGORY.get(cat, [])
-        filtered = [w for w in pool
-                    if self.min_len <= len(w["word"].replace(" ","").replace("-","")) <= self.max_len]
-        if not filtered:
-            filtered = pool or [{"word":"СЛОВО","hint":"Загаданное слово"}]
-        entry = random.choice(filtered)
-        self.word = entry["word"].upper()
-        self.hint = entry["hint"]
+def use_free_hint(user_id: int) -> bool:
+    u = get_user(user_id)
+    if not u or u["free_hints"] <= 0: return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET free_hints=free_hints-1 WHERE user_id=?", (user_id,))
+    conn.commit(); conn.close(); return True
 
-    def guess_letter(self, player_id: int, letter: str) -> int:
-        letter = letter.upper()
-        if player_id == self.p1_id:
-            self.p1_guessed.add(letter)
-        else:
-            self.p2_guessed.add(letter)
-        count = self.word.count(letter)
-        if count == 0:
-            if player_id == self.p1_id: self.p1_errors += 1
-            else: self.p2_errors += 1
-        return count
+def add_free_hints(user_id: int, amount: int = 1) -> bool:
+    if amount <= 0 or not get_user(user_id): return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET free_hints=free_hints+? WHERE user_id=?", (amount, user_id))
+    conn.commit(); conn.close(); return True
 
-    def is_complete(self, player_id: int) -> bool:
-        guessed = self.p1_guessed if player_id == self.p1_id else self.p2_guessed
-        return all(c in guessed or c in (" ","-") for c in self.word)
+def use_skip_skip(user_id: int) -> bool:
+    u = get_user(user_id)
+    if not u or u["skip_skips"] <= 0: return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET skip_skips=skip_skips-1 WHERE user_id=?", (user_id,))
+    conn.commit(); conn.close(); return True
 
-    def guess_word(self, player_id: int, word: str) -> bool:
-        return word.upper() == self.word
+def add_skip_skips(user_id: int, amount: int = 1) -> bool:
+    if amount <= 0 or not get_user(user_id): return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET skip_skips=skip_skips+? WHERE user_id=?", (amount, user_id))
+    conn.commit(); conn.close(); return True
 
-    def set_winner(self, player_id: int):
-        self.winner_id = player_id
-        self.active = False
+def use_word_replace(user_id: int) -> bool:
+    u = get_user(user_id)
+    if not u or u.get("word_replaces", 0) <= 0: return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET word_replaces=word_replaces-1 WHERE user_id=?", (user_id,))
+    conn.commit(); conn.close(); return True
 
-# ---------------------------------------------------------------------------
-# Мультиплеерная комната
-# ---------------------------------------------------------------------------
-class GameRoom:
-    def __init__(self, host_id: int, host_name: str, total_rounds: int,
-                 max_players: int, category: str, difficulty: str = "medium",
-                 room_type: str = "private", group_chat_id: int = 0,
-                 is_public: bool = False):
-        self.room_id        = self._gen_room_id()
-        self.host_id        = host_id
-        self.total_rounds   = total_rounds
-        self.max_players    = max_players
-        self.base_category  = category
-        self.difficulty     = difficulty
-        self.room_type      = room_type
-        self.group_chat_id  = group_chat_id
-        self.group_message_id: Optional[int] = None
-        self.is_public      = is_public  # True = поиск рандомов
+def use_bankrupt_shield(user_id: int) -> bool:
+    u = get_user(user_id)
+    if not u or u.get("bankrupt_shields", 0) <= 0: return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET bankrupt_shields=bankrupt_shields-1 WHERE user_id=?", (user_id,))
+    conn.commit(); conn.close(); return True
 
-        self.player_ids:   list  = []
-        self.player_names: dict  = {}
-        self.scores:       dict  = {}
-        self.round_scores: dict  = {}
+def add_bankrupt_shields(user_id: int, amount: int = 1) -> bool:
+    if amount <= 0 or not get_user(user_id): return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET bankrupt_shields=bankrupt_shields+? WHERE user_id=?", (amount, user_id))
+    conn.commit(); conn.close(); return True
 
-        self.active             = False
-        self.current_round      = 0
-        self.current_player_idx = 0
-        self.turn_counter       = 0
-        self.turn_timer_token   = 0
-        self.last_activity      = 0.0
-        self.double_round       = False  # активен ли двойной раунд
+def add_word_replaces(user_id: int, amount: int = 1) -> bool:
+    if amount <= 0 or not get_user(user_id): return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET word_replaces=word_replaces+? WHERE user_id=?", (amount, user_id))
+    conn.commit(); conn.close(); return True
 
-        self.current_word     = ""
-        self.current_hint     = ""
-        self.current_category = category
-        self.guessed_letters: set = set()
-        self.used_words: set = set()
+def set_active_title(user_id: int, title: str) -> bool:
+    u = get_user(user_id)
+    if not u or title not in u["titles"]: return False
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET active_title=? WHERE user_id=?", (title, user_id))
+    conn.commit(); conn.close(); return True
 
-        self.spin_points:    Optional[int] = None
-        self.prize_active:   bool          = False
-        self.jackpot_active: bool          = False
-        self.current_sector: str           = ""
+def get_leaderboard_xp(limit: int = 10, offset: int = 0) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id,username,xp,level,total_score FROM users ORDER BY xp DESC,total_score DESC LIMIT ? OFFSET ?", (limit, offset))
+    rows = c.fetchall(); conn.close()
+    return [{"user_id":r[0],"username":r[1],"xp":r[2],"level":r[3],"total_score":r[4]} for r in rows]
 
-        self.letter_cooldowns: dict = {}
-        self.COOLDOWN_SEC = 0.5
-        self.join_deadline: float = time.time() + 300
+def get_leaderboard_score(limit: int = 10, offset: int = 0) -> list:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT user_id,username,xp,level,total_score FROM users ORDER BY total_score DESC,xp DESC LIMIT ? OFFSET ?", (limit, offset))
+    rows = c.fetchall(); conn.close()
+    return [{"user_id":r[0],"username":r[1],"xp":r[2],"level":r[3],"total_score":r[4]} for r in rows]
 
-        self.add_player(host_id, host_name)
+def get_users_count() -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT COUNT(*) FROM users")
+    n = c.fetchone()[0]; conn.close(); return int(n or 0)
 
-    @staticmethod
-    def _gen_room_id() -> str:
-        return uuid.uuid4().hex[:6].upper()
+def get_user_position_xp(user_id: int) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT xp FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    if not row: conn.close(); return 0
+    c.execute("SELECT COUNT(*)+1 FROM users WHERE xp>?", (row[0],))
+    pos = c.fetchone()[0]; conn.close(); return int(pos or 0)
 
-    def add_player(self, uid: int, name: str):
-        self.player_ids.append(uid)
-        self.player_names[uid] = name
-        self.scores[uid]       = 0
-        self.round_scores[uid] = 0
-
-    def remove_player(self, uid: int):
-        if uid in self.player_ids:
-            self.player_ids.remove(uid)
-            self.player_names.pop(uid, None)
-            self.scores.pop(uid, None)
-            self.round_scores.pop(uid, None)
-            if self.current_player_idx >= len(self.player_ids):
-                self.current_player_idx = 0
-
-    @property
-    def current_player_id(self) -> int:
-        if not self.player_ids: return 0
-        return self.player_ids[self.current_player_idx % len(self.player_ids)]
-
-    def check_cooldown(self, uid: int) -> float:
-        last = self.letter_cooldowns.get(uid, 0)
-        diff = time.time() - last
-        if diff < self.COOLDOWN_SEC:
-            return self.COOLDOWN_SEC - diff
-        return 0
-
-    def apply_cooldown(self, uid: int):
-        self.letter_cooldowns[uid] = time.time()
-
-    def next_player(self):
-        self.current_player_idx = (self.current_player_idx + 1) % max(1, len(self.player_ids))
-        self.spin_points  = None
-        self.prize_active = False
-        self.jackpot_active = False
-        self.turn_counter += 1
-
-    def start_game(self):
-        self.active        = True
-        self.current_round = 1
-        self._load_round()
-
-    def _get_word_pool(self) -> list:
-        cfg  = DIFFICULTY_SETTINGS[self.difficulty]
-        pool = WORDS_BY_CATEGORY.get(self.current_category, [])
-        if not pool:
-            for cat_words in WORDS_BY_CATEGORY.values():
-                pool.extend(cat_words)
-        filtered = [w for w in pool
-                    if cfg["min_len"] <= len(w["word"].replace(" ","").replace("-","")) <= cfg["max_len"]
-                    and w.get("word","").upper() not in self.used_words]
-        if not filtered:
-            self.used_words.clear()
-            filtered = [w for w in pool
-                        if cfg["min_len"] <= len(w["word"].replace(" ","").replace("-","")) <= cfg["max_len"]]
-        if not filtered:
-            filtered = pool[:]
-        seen: set = set()
-        deduped = []
-        for w in filtered:
-            key = w.get("word","").strip().upper()
-            if key and key not in seen:
-                seen.add(key)
-                deduped.append(w)
-        return deduped
-
-    def _load_round(self):
-        pool      = self._get_word_pool()
-        available = [w for w in pool if w.get("word","").upper() not in self.used_words] if pool else []
-        if not available and pool:
-            self.used_words.clear()
-            available = pool
-        entry     = random.choice(available) if available else {"word":"СЛОВО","hint":"Загаданное слово"}
-        word_upper = entry.get("word","СЛОВО").upper()
-        self.used_words.add(word_upper)
-        self.current_word    = word_upper
-        self.current_hint    = entry["hint"]
-        self.guessed_letters = set()
-        self.double_round    = False
-        for uid in self.player_ids:
-            self.round_scores[uid] = 0
-        self.spin_points    = None
-        self.prize_active   = False
-        self.jackpot_active = False
-        self.turn_counter  += 1
-
-    def guess_letter(self, letter: str) -> int:
-        letter = letter.upper()
-        self.guessed_letters.add(letter)
-        return self.current_word.count(letter)
-
-    def is_round_complete(self) -> bool:
-        return all(c in self.guessed_letters or c in (" ","-") for c in self.current_word)
-
-    def has_next_round(self) -> bool:
-        return self.current_round < self.total_rounds
-
-    def next_round(self):
-        self.current_round     += 1
-        self.current_player_idx = (self.current_round - 1) % max(1, len(self.player_ids))
-        self._load_round()
-
-    @property
-    def is_full(self) -> bool:
-        if self.max_players == 0: return False
-        return len(self.player_ids) >= self.max_players
+def get_user_position_score(user_id: int) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT total_score FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    if not row: conn.close(); return 0
+    c.execute("SELECT COUNT(*)+1 FROM users WHERE total_score>?", (row[0],))
+    pos = c.fetchone()[0]; conn.close(); return int(pos or 0)
